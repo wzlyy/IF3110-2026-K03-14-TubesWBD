@@ -1,0 +1,193 @@
+{{ define "title" }}Manajemen Pengguna — Database Platform{{ end }}
+
+{{ define "content" }}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Manajemen Pengguna</h1>
+    <p class="page-subtitle">Kelola akun pengguna, status aktivasi, dan hak Platform Admin.</p>
+  </div>
+  <button type="button" class="btn btn-primary" onclick="openModal('createUserModal')">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="12" y1="5" x2="12" y2="19"></line>
+      <line x1="5" y1="12" x2="19" y2="12"></line>
+    </svg>
+    Tambah Pengguna Baru
+  </button>
+</div>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Username</th>
+          <th class="col-role">Peran</th>
+          <th class="col-status">Status</th>
+          <th>Group Terdaftar</th>
+          <th>Dibuat Pada</th>
+          <th class="col-actions">Aksi</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{ range .Users }}
+        <tr>
+          <td style="font-weight: 600; color: var(--text-primary);">{{ .Username }}</td>
+          <td class="col-role">
+            {{ if .IsPlatformAdmin }}
+            <span class="badge badge-admin badge-role">Platform Admin</span>
+            {{ else }}
+            <span class="badge badge-user badge-role">Standard User</span>
+            {{ end }}
+          </td>
+          <td class="col-status">
+            {{ if .IsActive }}
+            <span class="badge badge-active">Aktif</span>
+            {{ else }}
+            <span class="badge badge-inactive">Dinonaktifkan</span>
+            {{ end }}
+          </td>
+          <td>
+            {{ if .GroupNames }}
+              {{ range .GroupNames }}
+              <span class="badge badge-user" style="margin-right: 0.25rem;">{{ . }}</span>
+              {{ end }}
+            {{ else }}
+              <span style="color: var(--text-muted); font-size: 0.8rem;">(Tidak ada group)</span>
+            {{ end }}
+          </td>
+          <td style="color: var(--text-secondary); font-size: 0.85rem; white-space: nowrap;">
+            {{ .CreatedAt.Format "02 Jan 2006 15:04" }}
+          </td>
+          <td class="col-actions">
+            <div class="user-actions-grid">
+              <!-- 1. Toggle Active (Nonaktifkan / Aktifkan) -->
+              <form action="/admin/users/{{ .ID }}/toggle-active" method="POST" data-confirm="Ubah status aktivasi pengguna '{{ .Username }}'?" class="action-form">
+                <input type="hidden" name="csrf_token" value="{{ $.CSRFToken }}">
+                {{ if .IsActive }}
+                <button type="submit" class="btn btn-danger btn-table-action" title="Nonaktifkan Pengguna">Nonaktifkan</button>
+                {{ else }}
+                <button type="submit" class="btn btn-secondary btn-table-action" title="Aktifkan Pengguna">Aktifkan</button>
+                {{ end }}
+              </form>
+
+              <!-- 2. Toggle Admin (Jadikan Admin / Copot Admin) -->
+              <form action="/admin/users/{{ .ID }}/toggle-admin" method="POST" data-confirm="Ubah status Platform Admin untuk '{{ .Username }}'?" class="action-form">
+                <input type="hidden" name="csrf_token" value="{{ $.CSRFToken }}">
+                {{ if .IsPlatformAdmin }}
+                <button type="submit" class="btn btn-secondary btn-table-action" title="Copot Hak Admin">Copot Admin</button>
+                {{ else }}
+                <button type="submit" class="btn btn-secondary btn-table-action" title="Jadikan Platform Admin">Jadikan Admin</button>
+                {{ end }}
+              </form>
+
+              <!-- 3. Reset Password Trigger -->
+              <button type="button" class="btn btn-secondary btn-table-action" onclick="openResetPasswordModal('{{ .ID }}', '{{ .Username }}')" title="Reset Password Pengguna">
+                Reset Password
+              </button>
+            </div>
+          </td>
+        </tr>
+        {{ else }}
+        <tr>
+          <td colspan="6" style="text-align: center; color: var(--text-muted); padding: 2rem;">
+            Belum ada akun pengguna yang terdaftar.
+          </td>
+        </tr>
+        {{ end }}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Create User Modal -->
+<div id="createUserModal" class="modal-backdrop">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h3 class="modal-title">Tambah Pengguna Baru</h3>
+      <button type="button" class="modal-close" onclick="closeModal('createUserModal')">&times;</button>
+    </div>
+
+    <form action="/admin/users" method="POST">
+      <input type="hidden" name="csrf_token" value="{{ .CSRFToken }}">
+
+      <div class="form-group">
+        <label for="new_username" class="form-label">Username</label>
+        <input type="text" id="new_username" name="username" class="form-control" required placeholder="Contoh: john_doe">
+      </div>
+
+      <div class="form-group">
+        <label for="new_password" class="form-label">Password</label>
+        <div class="password-input-wrapper">
+          <input type="password" id="new_password" name="password" class="form-control" required minlength="6" placeholder="Minimal 6 karakter">
+          <button type="button" class="toggle-password-btn" data-target="new_password" aria-label="Lihat password" title="Lihat password">
+            <svg class="eye-icon-show" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+              <circle cx="12" cy="12" r="3"></circle>
+            </svg>
+            <svg class="eye-icon-hide" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display: none;">
+              <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
+              <line x1="1" y1="1" x2="23" y2="23"></line>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="form-group" style="display: flex; align-items: center; gap: 0.5rem; margin-top: 1rem;">
+        <input type="checkbox" id="is_admin_check" name="is_platform_admin" value="true">
+        <label for="is_admin_check" style="color: var(--text-primary); font-size: 0.9rem; cursor: pointer;">
+          Berikan peran Platform Administrator
+        </label>
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 0.75rem; margin-top: 1.5rem;">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('createUserModal')">Batal</button>
+        <button type="submit" class="btn btn-primary">Simpan Pengguna</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Reset Password Modal -->
+<div id="resetPasswordModal" class="modal-backdrop">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h3 class="modal-title">Reset Password: <span id="resetModalUsername" style="color: var(--primary);"></span></h3>
+      <button type="button" class="modal-close" onclick="closeModal('resetPasswordModal')">&times;</button>
+    </div>
+
+    <form id="resetPasswordForm" action="" method="POST">
+      <input type="hidden" name="csrf_token" value="{{ .CSRFToken }}">
+
+      <div class="form-group">
+        <label for="modal_new_password" class="form-label">Password Baru</label>
+        <div class="password-input-wrapper">
+          <input type="password" id="modal_new_password" name="new_password" class="form-control" required minlength="6" placeholder="Minimal 6 karakter">
+          <button type="button" class="toggle-password-btn" data-target="modal_new_password" aria-label="Lihat password" title="Lihat password">
+            <svg class="eye-icon-show" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8z"></path>
+              <circle cx="12" cy="12" r="3"></circle>
+            </svg>
+            <svg class="eye-icon-hide" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display: none;">
+              <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
+              <line x1="1" y1="1" x2="23" y2="23"></line>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 0.75rem; margin-top: 1.5rem;">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('resetPasswordModal')">Batal</button>
+        <button type="submit" class="btn btn-primary">Perbarui Password</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+  function openResetPasswordModal(userId, username) {
+    document.getElementById('resetModalUsername').textContent = username;
+    document.getElementById('resetPasswordForm').action = '/admin/users/' + userId + '/reset-password';
+    openModal('resetPasswordModal');
+  }
+</script>
+{{ end }}

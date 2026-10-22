@@ -1,0 +1,65 @@
+{{ define "title" }}Pilih Database — Database Platform{{ end }}
+
+{{ define "content" }}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Pilih Database Target</h1>
+    <p class="page-subtitle">Daftar database yang dapat Anda akses berdasarkan izin group Anda.</p>
+  </div>
+  {{ if .CurrentUser.IsPlatformAdmin }}
+  <a href="/admin/users" class="btn btn-primary">
+    Buka Panel Admin
+  </a>
+  {{ end }}
+</div>
+
+<div class="card" style="text-align: center; padding: 3rem 2rem;">
+  <div style="display: inline-flex; align-items: center; justify-content: center; width: 64px; height: 64px; border-radius: 50%; background: var(--primary-glow); margin-bottom: 1.5rem; color: var(--primary);">
+    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+      <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+      <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+    </svg>
+  </div>
+
+  <h2 style="font-size: 1.5rem; font-weight: 700; color: var(--text-primary); margin-bottom: 0.5rem;">
+    Selamat Datang, {{ .CurrentUser.Username }}!
+  </h2>
+  
+  <p style="color: var(--text-secondary); max-width: 600px; margin: 0 auto 1.5rem auto; font-size: 0.95rem; line-height: 1.6;">
+    Anda saat ini masuk sebagai 
+    {{ if .CurrentUser.IsPlatformAdmin }}
+    <span class="badge badge-admin">Platform Admin</span>
+    {{ else }}
+    <span class="badge badge-user">Standard User</span>
+    {{ end }}.
+  </p>
+
+  <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 1.5rem; max-width: 650px; margin: 0 auto; text-align: left;">
+    <h4 style="color: var(--text-primary); font-size: 0.95rem; margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.5rem;">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--accent-cyan);">
+        <circle cx="12" cy="12" r="10"></circle>
+        <line x1="12" y1="16" x2="12" y2="12"></line>
+        <line x1="12" y1="8" x2="12.01" y2="8"></line>
+      </svg>
+      Informasi Alur Milestone 1:
+    </h4>
+    <ul style="color: var(--text-secondary); font-size: 0.875rem; margin-left: 1.5rem; line-height: 1.7;">
+      <li><strong>Fase 1 (Anggota 1 - Selesai):</strong> Autentikasi aman, session handling (idle/absolute timeout, rotasi, CSRF), kontrol akses backend, dan Panel Admin (User, Group, Grants).</li>
+      <li><strong>Fase 2 (Anggota 2):</strong> Pendaftaran koneksi PostgreSQL & MySQL, Test Connection, Database Selector, Schema Viewer, Data Viewer, dan Query Plan (EXPLAIN).</li>
+    </ul>
+
+    {{ if .CurrentUser.IsPlatformAdmin }}
+    <div style="margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--border-subtle); text-align: center;">
+      <a href="/admin/users" class="btn btn-primary" style="margin-right: 0.5rem;">Kelola Pengguna</a>
+      <a href="/admin/groups" class="btn btn-secondary" style="margin-right: 0.5rem;">Kelola Groups</a>
+      <a href="/admin/grants" class="btn btn-secondary">Kelola Grants</a>
+    </div>
+    {{ else }}
+    <div style="margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--border-subtle); color: var(--text-muted); font-size: 0.85rem; text-align: center;">
+      Untuk mengakses <strong>Panel Admin</strong>, silakan logout dan login menggunakan akun Platform Admin (<code>admin</code>).
+    </div>
+    {{ end }}
+  </div>
+</div>
+{{ end }}

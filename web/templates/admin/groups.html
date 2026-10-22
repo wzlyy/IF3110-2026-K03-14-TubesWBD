@@ -1,0 +1,214 @@
+{{ define "title" }}Manajemen Group — Database Platform{{ end }}
+
+{{ define "content" }}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Manajemen Group</h1>
+    <p class="page-subtitle">Kelola group pengguna dan tetapkan keanggotaan untuk kontrol akses terpusat.</p>
+  </div>
+  <button type="button" class="btn btn-primary" onclick="openModal('createGroupModal')">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="12" y1="5" x2="12" y2="19"></line>
+      <line x1="5" y1="12" x2="19" y2="12"></line>
+    </svg>
+    Buat Group Baru
+  </button>
+</div>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Nama Group</th>
+          <th>Jumlah Anggota</th>
+          <th>Daftar Anggota</th>
+          <th>Dibuat Pada</th>
+          <th style="text-align: right;">Aksi</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{ range .Groups }}
+        <tr>
+          <td style="font-weight: 600; color: var(--text-primary);">{{ .Name }}</td>
+          <td>
+            <span class="badge badge-user">{{ len .Members }} Anggota</span>
+          </td>
+          <td>
+            {{ if .Members }}
+              <div style="display: flex; flex-wrap: wrap; gap: 0.35rem;">
+                {{ range .Members }}
+                <span class="badge badge-user">{{ .Username }}</span>
+                {{ end }}
+              </div>
+            {{ else }}
+              <span style="color: var(--text-muted); font-size: 0.8rem;">(Belum ada anggota)</span>
+            {{ end }}
+          </td>
+          <td style="color: var(--text-secondary); font-size: 0.85rem;">
+            {{ .CreatedAt.Format "02 Jan 2006 15:04" }}
+          </td>
+          <td style="text-align: right;">
+            <div style="display: inline-flex; gap: 0.5rem;">
+              <!-- Manage Members Button -->
+              <button type="button" class="btn btn-secondary btn-sm" onclick="openManageMembersModal('{{ .ID }}', '{{ .Name }}')">
+                Kelola Anggota
+              </button>
+
+              <!-- Edit Name Button -->
+              <button type="button" class="btn btn-secondary btn-sm" onclick="openEditGroupModal('{{ .ID }}', '{{ .Name }}')">
+                Edit
+              </button>
+
+              <!-- Delete Group Form -->
+              <form action="/admin/groups/{{ .ID }}/delete" method="POST" data-confirm="Hapus group '{{ .Name }}'? Hak akses database dan keanggotaan group ini akan dicabut." style="margin: 0;">
+                <input type="hidden" name="csrf_token" value="{{ $.CSRFToken }}">
+                <button type="submit" class="btn btn-danger btn-sm" title="Hapus Group">Hapus</button>
+              </form>
+            </div>
+          </td>
+        </tr>
+        {{ else }}
+        <tr>
+          <td colspan="5" style="text-align: center; color: var(--text-muted); padding: 2rem;">
+            Belum ada group yang dibuat.
+          </td>
+        </tr>
+        {{ end }}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Create Group Modal -->
+<div id="createGroupModal" class="modal-backdrop">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h3 class="modal-title">Buat Group Baru</h3>
+      <button type="button" class="modal-close" onclick="closeModal('createGroupModal')">&times;</button>
+    </div>
+
+    <form action="/admin/groups" method="POST">
+      <input type="hidden" name="csrf_token" value="{{ .CSRFToken }}">
+
+      <div class="form-group">
+        <label for="group_name" class="form-label">Nama Group</label>
+        <input type="text" id="group_name" name="name" class="form-control" required placeholder="Contoh: Engineering, Data Analytics, QA Team">
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 0.75rem; margin-top: 1.5rem;">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('createGroupModal')">Batal</button>
+        <button type="submit" class="btn btn-primary">Simpan Group</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Edit Group Modal -->
+<div id="editGroupModal" class="modal-backdrop">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h3 class="modal-title">Edit Nama Group</h3>
+      <button type="button" class="modal-close" onclick="closeModal('editGroupModal')">&times;</button>
+    </div>
+
+    <form id="editGroupForm" action="" method="POST">
+      <input type="hidden" name="csrf_token" value="{{ .CSRFToken }}">
+
+      <div class="form-group">
+        <label for="edit_group_name" class="form-label">Nama Group</label>
+        <input type="text" id="edit_group_name" name="name" class="form-control" required>
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 0.75rem; margin-top: 1.5rem;">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('editGroupModal')">Batal</button>
+        <button type="submit" class="btn btn-primary">Perbarui Nama</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Manage Members Modal -->
+<div id="manageMembersModal" class="modal-backdrop">
+  <div class="modal-content" style="max-width: 600px;">
+    <div class="modal-header">
+      <h3 class="modal-title">Kelola Anggota: <span id="memberModalGroupName" style="color: var(--primary);"></span></h3>
+      <button type="button" class="modal-close" onclick="closeModal('manageMembersModal')">&times;</button>
+    </div>
+
+    <!-- Add Member Form -->
+    <form id="addMemberForm" action="" method="POST" style="margin-bottom: 1.5rem; padding-bottom: 1.5rem; border-bottom: 1px solid var(--border-subtle);">
+      <input type="hidden" name="csrf_token" value="{{ .CSRFToken }}">
+      <div class="form-group">
+        <label class="form-label">Tambah Anggota ke Group</label>
+        <div style="display: flex; gap: 0.5rem;">
+          <select name="user_id" class="form-control" required style="flex: 1;">
+            <option value="" disabled selected>Pilih pengguna...</option>
+            {{ range .AvailableUsers }}
+            <option value="{{ .UserID }}">{{ .Username }}</option>
+            {{ end }}
+          </select>
+          <button type="submit" class="btn btn-primary">Tambah</button>
+        </div>
+      </div>
+    </form>
+
+    <!-- Current Members List -->
+    <div>
+      <h4 style="font-size: 0.95rem; font-weight: 600; margin-bottom: 0.75rem; color: var(--text-primary);">Anggota Saat Ini:</h4>
+      <div id="groupMembersContainer" style="display: flex; flex-direction: column; gap: 0.5rem; max-height: 250px; overflow-y: auto;">
+        <!-- Filled dynamically by JavaScript -->
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  // Group members data encoded into JS object for client-side display
+  const groupData = {
+    {{ range .Groups }}
+    "{{ .ID }}": [
+      {{ range .Members }}
+      { id: "{{ .UserID }}", username: "{{ .Username }}" },
+      {{ end }}
+    ],
+    {{ end }}
+  };
+
+  function openEditGroupModal(id, name) {
+    document.getElementById('edit_group_name').value = name;
+    document.getElementById('editGroupForm').action = '/admin/groups/' + id + '/edit';
+    openModal('editGroupModal');
+  }
+
+  function openManageMembersModal(groupId, groupName) {
+    document.getElementById('memberModalGroupName').textContent = groupName;
+    document.getElementById('addMemberForm').action = '/admin/groups/' + groupId + '/members/add';
+
+    const container = document.getElementById('groupMembersContainer');
+    container.innerHTML = '';
+
+    const members = groupData[groupId] || [];
+    if (members.length === 0) {
+      container.innerHTML = '<p style="color: var(--text-muted); font-size: 0.85rem;">Belum ada anggota dalam group ini.</p>';
+    } else {
+      members.forEach(m => {
+        const row = document.createElement('div');
+        row.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0.75rem; background: var(--bg-card); border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);';
+        
+        row.innerHTML = `
+          <span style="font-size: 0.9rem; font-weight: 500; color: var(--text-primary);">${m.username}</span>
+          <form action="/admin/groups/${groupId}/members/remove" method="POST" data-confirm="Hapus ${m.username} dari group ini?" style="margin: 0;">
+            <input type="hidden" name="csrf_token" value="{{ .CSRFToken }}">
+            <input type="hidden" name="user_id" value="${m.id}">
+            <button type="submit" class="btn btn-danger btn-sm">Hapus</button>
+          </form>
+        `;
+        container.appendChild(row);
+      });
+    }
+
+    openModal('manageMembersModal');
+  }
+</script>
+{{ end }}

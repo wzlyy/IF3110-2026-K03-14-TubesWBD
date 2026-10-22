@@ -1,0 +1,59 @@
+services:
+  platform-db:
+    image: postgres:16-alpine
+    container_name: tubeswbd-platform-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PLATFORM_DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${PLATFORM_DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${PLATFORM_DB_NAME:-platform_db}
+    ports:
+      - "${PLATFORM_DB_PORT:-5432}:5432"
+    volumes:
+      - platform_data:/var/lib/postgresql/data
+      - ./migrations/platform:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PLATFORM_DB_USER:-postgres} -d ${PLATFORM_DB_NAME:-platform_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  target-postgres:
+    image: postgres:16-alpine
+    container_name: tubeswbd-target-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${TARGET_PG_USER:-postgres}
+      POSTGRES_PASSWORD: ${TARGET_PG_PASSWORD:-postgres}
+      POSTGRES_DB: ${TARGET_PG_NAME:-target_db}
+    ports:
+      - "${TARGET_PG_PORT:-5433}:5432"
+    volumes:
+      - target_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TARGET_PG_USER:-postgres} -d ${TARGET_PG_NAME:-target_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  target-mysql:
+    image: mysql:8.0
+    container_name: tubeswbd-target-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${TARGET_MYSQL_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${TARGET_MYSQL_NAME:-target_db}
+    ports:
+      - "${TARGET_MYSQL_PORT:-3306}:3306"
+    volumes:
+      - target_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${TARGET_MYSQL_PASSWORD:-rootpassword}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  platform_data:
+  target_pg_data:
+  target_mysql_data:

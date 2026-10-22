@@ -1,0 +1,120 @@
+{{ define "title" }}Hak Akses Database (Grants) — Database Platform{{ end }}
+
+{{ define "content" }}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Hak Akses Database (Grants)</h1>
+    <p class="page-subtitle">Tetapkan tingkat izin akses (View Only / View + Edit) untuk setiap group terhadap database target.</p>
+  </div>
+  <button type="button" class="btn btn-primary" onclick="openModal('assignGrantModal')">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="12" y1="5" x2="12" y2="19"></line>
+      <line x1="5" y1="12" x2="19" y2="12"></line>
+    </svg>
+    Tetapkan Hak Akses Baru
+  </button>
+</div>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Group</th>
+          <th>Database Target</th>
+          <th>Tipe DBMS</th>
+          <th>Tingkat Hak Akses</th>
+          <th style="text-align: right;">Aksi</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{ range .Grants }}
+        <tr>
+          <td style="font-weight: 600; color: var(--text-primary);">{{ .GroupName }}</td>
+          <td style="color: var(--text-primary);">{{ .DatabaseName }}</td>
+          <td>
+            {{ if eq .DBMS "postgres" }}
+            <span class="badge badge-dbms-postgres">PostgreSQL</span>
+            {{ else if eq .DBMS "mysql" }}
+            <span class="badge badge-dbms-mysql">MySQL</span>
+            {{ else }}
+            <span class="badge badge-user">{{ .DBMS }}</span>
+            {{ end }}
+          </td>
+          <td>
+            {{ if eq .AccessLevel "VIEW_EDIT" }}
+            <span class="badge badge-view-edit">View + Edit</span>
+            {{ else }}
+            <span class="badge badge-view-only">View Only</span>
+            {{ end }}
+          </td>
+          <td style="text-align: right;">
+            <div style="display: inline-flex; gap: 0.5rem;">
+              <form action="/admin/grants/delete" method="POST" data-confirm="Cabut hak akses group '{{ .GroupName }}' terhadap database '{{ .DatabaseName }}'?" style="margin: 0;">
+                <input type="hidden" name="csrf_token" value="{{ $.CSRFToken }}">
+                <input type="hidden" name="group_id" value="{{ .GroupID }}">
+                <input type="hidden" name="database_id" value="{{ .DatabaseID }}">
+                <button type="submit" class="btn btn-danger btn-sm" title="Cabut Hak Akses">Cabut Izin</button>
+              </form>
+            </div>
+          </td>
+        </tr>
+        {{ else }}
+        <tr>
+          <td colspan="5" style="text-align: center; color: var(--text-muted); padding: 2rem;">
+            Belum ada izin database yang ditetapkan untuk group apapun.
+          </td>
+        </tr>
+        {{ end }}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Assign Grant Modal -->
+<div id="assignGrantModal" class="modal-backdrop">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h3 class="modal-title">Tetapkan Hak Akses Database</h3>
+      <button type="button" class="modal-close" onclick="closeModal('assignGrantModal')">&times;</button>
+    </div>
+
+    <form action="/admin/grants" method="POST">
+      <input type="hidden" name="csrf_token" value="{{ .CSRFToken }}">
+
+      <div class="form-group">
+        <label for="grant_group_id" class="form-label">Pilih Group</label>
+        <select id="grant_group_id" name="group_id" class="form-control" required>
+          <option value="" disabled selected>Pilih group pengguna...</option>
+          {{ range .Groups }}
+          <option value="{{ .ID }}">{{ .Name }}</option>
+          {{ end }}
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label for="grant_database_id" class="form-label">Pilih Database Target</label>
+        <select id="grant_database_id" name="database_id" class="form-control" required>
+          <option value="" disabled selected>Pilih database target...</option>
+          {{ range .Databases }}
+          <option value="{{ .ID }}">{{ .Name }} ({{ .DBMS }})</option>
+          {{ end }}
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label for="grant_access_level" class="form-label">Tingkat Hak Akses</label>
+        <select id="grant_access_level" name="access_level" class="form-control" required>
+          <option value="VIEW_ONLY">View Only (Hanya baca Schema, Data, dan Riwayat)</option>
+          <option value="VIEW_EDIT">View + Edit (Baca + Buat & Eksekusi Migration)</option>
+        </select>
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 0.75rem; margin-top: 1.5rem;">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('assignGrantModal')">Batal</button>
+        <button type="submit" class="btn btn-primary">Simpan Hak Akses</button>
+      </div>
+    </form>
+  </div>
+</div>
+{{ end }}

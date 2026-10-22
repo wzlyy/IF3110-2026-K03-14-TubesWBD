@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ block "title" . }}Database Management Platform{{ end }}</title>
+  <link rel="stylesheet" href="/static/css/base.css?v=2.3">
+  <script defer src="/static/js/main.js?v=2.3"></script>
+</head>
+<body>
+  {{ if .CurrentUser }}
+  <header class="navbar">
+    <a href="/databases" class="nav-brand">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--primary);">
+        <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+      </svg>
+      <span>DB Platform</span>
+      <span class="brand-badge">IF3110</span>
+    </a>
+
+    <nav>
+      <ul class="nav-links">
+        <li><a href="/databases" class="{{ if eq .ActiveTab "databases" }}active{{ end }}">Databases</a></li>
+        {{ if .CurrentUser.IsPlatformAdmin }}
+        <li><a href="/admin/users" class="{{ if eq .ActiveTab "users" }}active{{ end }}">Users</a></li>
+        <li><a href="/admin/groups" class="{{ if eq .ActiveTab "groups" }}active{{ end }}">Groups</a></li>
+        <li><a href="/admin/grants" class="{{ if eq .ActiveTab "grants" }}active{{ end }}">Grants</a></li>
+        <li><a href="/admin/connections" class="{{ if eq .ActiveTab "connections" }}active{{ end }}">Connections</a></li>
+        {{ end }}
+      </ul>
+    </nav>
+
+    <div class="nav-user">
+      <div class="user-pill">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+          <circle cx="12" cy="7" r="4"></circle>
+        </svg>
+        <span>{{ .CurrentUser.Username }}</span>
+        {{ if .CurrentUser.IsPlatformAdmin }}
+        <span class="badge badge-admin">Admin</span>
+        {{ else }}
+        <span class="badge badge-user">User</span>
+        {{ end }}
+      </div>
+
+      <form action="/logout" method="POST" style="margin: 0;">
+        <input type="hidden" name="csrf_token" value="{{ .CSRFToken }}">
+        <button type="submit" class="btn btn-secondary btn-sm" title="Keluar">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+            <polyline points="16 17 21 12 16 7"></polyline>
+            <line x1="21" y1="12" x2="9" y2="12"></line>
+          </svg>
+          Logout
+        </button>
+      </form>
+    </div>
+  </header>
+  {{ end }}
+
+  <main class="main-container">
+    {{ if .SuccessMessage }}
+    <div class="flash-container">
+      <div class="alert alert-success alert-auto-dismiss">
+        <span>{{ .SuccessMessage }}</span>
+        <button type="button" class="alert-close">&times;</button>
+      </div>
+    </div>
+    {{ end }}
+
+    {{ if .ErrorMessage }}
+    <div class="flash-container">
+      <div class="alert alert-danger">
+        <span>{{ .ErrorMessage }}</span>
+        <button type="button" class="alert-close">&times;</button>
+      </div>
+    </div>
+    {{ end }}
+
+    {{ block "content" . }}{{ end }}
+  </main>
+</body>
+</html>

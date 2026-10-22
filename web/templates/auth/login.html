@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login — Database Management Platform</title>
+  <link rel="stylesheet" href="/static/css/base.css?v=2.2">
+  <script defer src="/static/js/main.js?v=2.2"></script>
+</head>
+<body>
+  <div class="login-wrapper">
+    <div class="login-card">
+      <div style="text-align: center; margin-bottom: 1.5rem;">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--primary);">
+          <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+          <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+          <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+        </svg>
+      </div>
+
+      <h1 class="login-title">Database Platform</h1>
+      <p class="login-subtitle">Masuk untuk mengelola database dan migration</p>
+
+      {{ if .Error }}
+      <div id="loginErrorAlert" class="alert alert-danger" style="margin-bottom: 1.5rem;">
+        <span>{{ .Error }}</span>
+        <button type="button" class="alert-close" aria-label="Tutup">&times;</button>
+      </div>
+      {{ end }}
+
+      {{ if .Success }}
+      <div class="alert alert-success alert-auto-dismiss" style="margin-bottom: 1.5rem;">
+        <span>{{ .Success }}</span>
+        <button type="button" class="alert-close" aria-label="Tutup">&times;</button>
+      </div>
+      {{ end }}
+
+      <form action="/login" method="POST">
+        <div class="form-group">
+          <label for="username" class="form-label">Username</label>
+          <input type="text" id="username" name="username" class="form-control" placeholder="Masukkan username" required autocomplete="username" autofocus value="{{ .Username }}">
+        </div>
+
+        <div class="form-group">
+          <label for="password" class="form-label">Password</label>
+          <div class="password-input-wrapper">
+            <input type="password" id="password" name="password" class="form-control" placeholder="••••••••" required autocomplete="current-password">
+            <button type="button" id="togglePasswordBtn" class="toggle-password-btn" data-target="password" aria-label="Lihat password" title="Lihat password">
+              <!-- Eye Icon (Ditampilkan saat password tersembunyi) -->
+              <svg id="eyeIcon" class="eye-icon-show" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                <circle cx="12" cy="12" r="3"></circle>
+              </svg>
+              <!-- Eye-Off Icon (Ditampilkan saat password terlihat) -->
+              <svg id="eyeOffIcon" class="eye-icon-hide" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display: none;">
+                <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
+                <line x1="1" y1="1" x2="23" y2="23"></line>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <button type="submit" class="btn btn-primary" style="width: 100%; margin-top: 1rem;">
+          Masuk ke Platform
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    // 1. Auto-dismiss pesan sukses logout setelah 4 detik
+    setTimeout(function() {
+      document.querySelectorAll('.alert-success, .alert-auto-dismiss').forEach(function(el) {
+        el.style.transition = 'opacity 0.4s ease, transform 0.4s ease';
+        el.style.opacity = '0';
+        el.style.transform = 'translateY(-8px)';
+        setTimeout(function() { el.remove(); }, 400);
+      });
+    }, 4000);
+
+    // 2. Hilangkan pesan error merah begitu user mulai mengetik ulang
+    var errBox = document.getElementById('loginErrorAlert');
+    if (errBox) {
+      var clearError = function() {
+        errBox.style.transition = 'opacity 0.3s ease';
+        errBox.style.opacity = '0';
+        setTimeout(function() { errBox.remove(); }, 300);
+      };
+      var uInput = document.getElementById('username');
+      var pInput = document.getElementById('password');
+      if (uInput) uInput.addEventListener('input', clearError, { once: true });
+      if (pInput) pInput.addEventListener('input', clearError, { once: true });
+    }
+
+    // 3. Tombol toggle untuk melihat atau menyembunyikan password
+    var toggleBtn = document.getElementById('togglePasswordBtn');
+    var passwordInput = document.getElementById('password');
+    var eyeIcon = document.getElementById('eyeIcon');
+    var eyeOffIcon = document.getElementById('eyeOffIcon');
+
+    if (toggleBtn && passwordInput && eyeIcon && eyeOffIcon && !toggleBtn.dataset.toggleBound) {
+      toggleBtn.dataset.toggleBound = 'true';
+      toggleBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        var isPassword = passwordInput.getAttribute('type') === 'password';
+        if (isPassword) {
+          passwordInput.setAttribute('type', 'text');
+          eyeIcon.style.display = 'none';
+          eyeOffIcon.style.display = 'block';
+          toggleBtn.setAttribute('aria-label', 'Sembunyikan password');
+          toggleBtn.setAttribute('title', 'Sembunyikan password');
+        } else {
+          passwordInput.setAttribute('type', 'password');
+          eyeIcon.style.display = 'block';
+          eyeOffIcon.style.display = 'none';
+          toggleBtn.setAttribute('aria-label', 'Lihat password');
+          toggleBtn.setAttribute('title', 'Lihat password');
+        }
+        passwordInput.focus();
+      });
+    }
+  </script>
+</body>
+</html>

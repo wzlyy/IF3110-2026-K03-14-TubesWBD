@@ -1,0 +1,81 @@
+.connection-form-card { padding: 1.5rem; margin-bottom: 2rem; }
+.connection-help { color: var(--text-secondary); font-size: 0.875rem; line-height: 1.6; margin: 0.375rem 0 0; }
+.connection-form-card > .connection-help { margin-bottom: 1.5rem; max-width: 70ch; }
+.connection-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 1.5rem; }
+.connection-password { max-width: 34rem; }
+.connection-actions { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.connection-actions form { margin: 0; }
+.connection-name { font-weight: 600; overflow-wrap: anywhere; }
+.connection-detail { display: block; overflow-wrap: anywhere; }
+.connection-empty { padding: 2rem !important; text-align: center; color: var(--text-secondary); }
+.connection-form-card :focus-visible, .connection-actions :focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+.connection-form-card input::placeholder { color: var(--text-secondary); }
+.connection-form-card input { caret-color: var(--primary); }
+.connection-form-card input[type="number"] { font-variant-numeric: tabular-nums; }
+.database-page { min-width: 0; }
+.database-page h1, .database-page h2, .database-page h3 { overflow-wrap: anywhere; }
+.database-back { display: inline-block; margin-bottom: 1rem; text-underline-offset: 3px; }
+.database-scroll { max-width: 100%; overflow-x: auto; scrollbar-color: var(--text-secondary) var(--bg-main); }
+.database-page .data-table { margin-bottom: 0; }
+.database-page .data-table th, .database-page .data-table td { overflow-wrap: anywhere; }
+.database-page .text-secondary { color: var(--text-secondary); }
+.database-page .page-header { flex-wrap: wrap; gap: 1rem; }
+.database-page .page-header h1 { font-size: 1.75rem; font-weight: 700; letter-spacing: -.03em; }
+.database-table-picker { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1.75rem; }
+.database-table-picker a { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.database-table-picker [aria-current="page"] { background: var(--primary); color: white; }
+.database-empty { padding: 2rem; text-align: center; color: var(--text-secondary); }
+.database-empty h2 { color: var(--text-primary); margin-bottom: .75rem; }
+.database-empty .btn { margin-top: 1rem; }
+.database-section-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem; margin-bottom: 1rem; }
+.database-schema-name { margin: 2rem 0 1rem; }
+.database-schema-table { padding: 1.5rem; margin-bottom: 1.5rem; }
+.database-schema-table h4 { margin: 1.5rem 0 .75rem; }
+.database-definitions dt { font-weight: 600; overflow-wrap: anywhere; }
+.database-definitions dt span { font-weight: 400; }
+.database-definitions dd { margin: .375rem 0 1rem; overflow-wrap: anywhere; }
+.database-caption { text-align: left; padding: .75rem 1rem; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.database-data-table { width: max-content; min-width: 100%; }
+.database-data-table th { max-width: 24rem; }
+.database-data-table td { min-width: 8rem; max-width: 28rem; vertical-align: top; }
+.database-cell { max-width: 28rem; max-height: 18rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; scrollbar-color: var(--text-secondary) transparent; }
+.database-null { color: #475569; background: #e2e8f0; padding: .15rem .4rem; border-radius: 4px; font-family: monospace; }
+.database-empty-value { color: var(--text-secondary); font-style: italic; }
+.database-pagination { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 1rem; margin-top: 1rem; font-variant-numeric: tabular-nums; }
+.database-pagination [aria-disabled="true"] { opacity: .65; cursor: default; }
+.database-page :focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+.database-page ::selection { background: #c7d2fe; color: #1e1b4b; }
+.explain-form-card, .explain-results { padding: 1.5rem; margin-bottom: 1.5rem; }
+.explain-form-card h2, .explain-results h2 { margin-bottom: .5rem; }
+.explain-form-card .form-group { margin-top: 1.25rem; }
+.explain-form-card textarea { width: 100%; min-height: 12rem; resize: vertical; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; line-height: 1.5; tab-size: 2; }
+.explain-choice { display: flex; flex-wrap: wrap; align-items: baseline; gap: .5rem 1rem; margin: 1rem 0; }
+.explain-choice label, .explain-warning label { display: inline-flex; align-items: baseline; gap: .5rem; cursor: pointer; }
+.explain-warning { max-width: 80ch; line-height: 1.5; }
+.explain-warning p { margin: 0 0 .75rem; }
+.plan-tree { list-style: none; padding-left: 0; margin: 1rem 0; }
+.plan-tree .plan-tree { border-left: 2px solid #cbd5e1; margin: .75rem 0 .25rem .5rem; padding-left: 1rem; }
+.plan-node { min-width: 0; padding: .75rem 0; }
+.plan-node-heading { display: flex; flex-wrap: wrap; gap: .5rem; align-items: baseline; overflow-wrap: anywhere; }
+.plan-node-heading span { color: var(--text-secondary); }
+.plan-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr)); gap: .5rem 1rem; margin: .75rem 0 0; font-variant-numeric: tabular-nums; }
+.plan-metrics div { min-width: 0; }
+.plan-metrics dt { color: var(--text-secondary); font-size: .8rem; }
+.plan-metrics dd { margin: .15rem 0 0; overflow-wrap: anywhere; }
+.explain-raw { margin-top: 1.25rem; }
+.explain-raw summary { cursor: pointer; font-weight: 600; }
+.explain-raw pre { max-height: 28rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #f8fafc; padding: 1rem; border-radius: .5rem; }
+@media (max-width: 900px) {
+  .navbar { flex-wrap: wrap; gap: 1rem; }
+  .navbar nav { min-width: 0; }
+  .nav-links { flex-wrap: wrap; }
+  .nav-user { flex-wrap: wrap; min-width: 0; max-width: 100%; }
+  .user-pill { min-width: 0; max-width: 100%; flex-wrap: wrap; overflow-wrap: anywhere; }
+  .nav-links a { display: inline-block; }
+}
+@media (max-width: 640px) {
+  .connection-fields { grid-template-columns: 1fr; }
+  .connection-form-card { padding: 1.25rem; }
+  .database-schema-table { padding: 1rem; }
+  .database-pagination { justify-content: space-between; gap: .5rem; }
+}

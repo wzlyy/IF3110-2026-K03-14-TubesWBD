@@ -1,13 +1,13 @@
 # IF3110-2026-K03-14-TubesWBD
 
-Platform manajemen database, multi-DBMS target viewer, dan runner migration SQL berbasis Go murni (standar web library `net/http` + Vanilla CSS).
+Platform manajemen koneksi serta viewer database PostgreSQL/MySQL berbasis Go `net/http` dan Vanilla CSS. Modul editor serta runner migration SQL dikerjakan pada fase Anggota 3.
 
 ---
 
 ## Cara Menjalankan Program
 
 ### 1. Prasyarat
-- **Go** (versi 1.22 atau lebih baru)
+- **Go 1.27** (sesuai `go.mod`)
 - **Docker & Docker Compose** (atau PostgreSQL lokal)
 
 ### 2. Konfigurasi Environment
@@ -39,7 +39,13 @@ Aplikasi dapat diakses melalui browser pada:
 ---
 
 ## Menjalankan Unit & Integration Test
-Untuk memastikan seluruh modul fondasi, autentikasi, sesi, dan access control berjalan dengan baik:
+Unit test tidak memerlukan database target:
+```powershell
+go test -p 1 ./...
+```
+
+Integration test memakai **database platform dan target yang khusus untuk pengujian**. Tes fondasi menghapus isi tabel platform pada database yang dikonfigurasi, jadi jangan arahkan perintah berikut ke database demo atau produksi. Sediakan PostgreSQL 16 dan MySQL 8.0 kosong, atur `PLATFORM_DB_*`, `TARGET_PG_*`, `TARGET_MYSQL_*`, serta `ENCRYPTION_KEY` pada environment pengujian, lalu jalankan:
+
 ```powershell
 go test -v ./internal/...
 ```

@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{{ block "title" . }}Database Management Platform{{ end }}</title>
   <link rel="stylesheet" href="/static/css/base.css?v=2.3">
+  {{ if or (eq .ActiveTab "connections") (eq .ActiveTab "databases") }}<link rel="stylesheet" href="/static/css/database.css?v=2">{{ end }}
   <script defer src="/static/js/main.js?v=2.3"></script>
 </head>
 <body>

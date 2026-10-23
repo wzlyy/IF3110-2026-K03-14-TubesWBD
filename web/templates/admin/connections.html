@@ -1,0 +1,81 @@
+{{ define "title" }}Koneksi Database — Database Platform{{ end }}
+
+{{ define "content" }}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Koneksi Database</h1>
+    <p class="page-subtitle">Kelola koneksi ke database target, lalu tetapkan hak akses melalui halaman Grants.</p>
+  </div>
+</div>
+
+<section class="card connection-form-card" aria-labelledby="connection-form-title">
+  <h2 id="connection-form-title" class="card-title">{{ if .Form.ID }}Edit koneksi{{ else }}Tambah koneksi{{ end }}</h2>
+  <p class="connection-help">Simpan pengaturan koneksi, lalu gunakan Uji Koneksi untuk memeriksa akses database.</p>
+  <form action="/admin/connections{{ if .Form.ID }}/{{ .Form.ID }}/edit{{ end }}" method="POST">
+    <input type="hidden" name="csrf_token" value="{{ .CSRFToken }}">
+    <div class="connection-fields">
+      <div class="form-group">
+        <label for="connection-name" class="form-label">Nama koneksi</label>
+        <input id="connection-name" name="name" class="form-control" value="{{ .Form.Name }}" maxlength="100" required>
+      </div>
+      <div class="form-group">
+        <label for="connection-dbms" class="form-label">Tipe DBMS</label>
+        <select id="connection-dbms" name="dbms" class="form-control" required><option value="postgres" {{ if eq .Form.DBMS "postgres" }}selected{{ end }}>PostgreSQL</option><option value="mysql" {{ if eq .Form.DBMS "mysql" }}selected{{ end }}>MySQL</option></select>
+      </div>
+      <div class="form-group">
+        <label for="connection-host" class="form-label">Host</label>
+        <input id="connection-host" name="host" class="form-control" value="{{ .Form.Host }}" maxlength="255" placeholder="db.example.com" spellcheck="false" required>
+      </div>
+      <div class="form-group">
+        <label for="connection-port" class="form-label">Port</label>
+        <input id="connection-port" name="port" type="number" class="form-control" value="{{ .Form.Port }}" min="1" max="65535" required>
+      </div>
+      <div class="form-group">
+        <label for="connection-db-name" class="form-label">Nama database</label>
+        <input id="connection-db-name" name="db_name" class="form-control" value="{{ .Form.DBName }}" maxlength="100" spellcheck="false" required>
+      </div>
+      <div class="form-group">
+        <label for="connection-username" class="form-label">Username database</label>
+        <input id="connection-username" name="username" class="form-control" value="{{ .Form.Username }}" maxlength="100" autocomplete="off" spellcheck="false" required>
+      </div>
+      <div class="form-group connection-password">
+        <label for="connection-password" class="form-label">Password database</label>
+        <input id="connection-password" name="password" type="password" class="form-control" maxlength="4096" autocomplete="new-password" aria-describedby="connection-password-help">
+        <p id="connection-password-help" class="connection-help">{{ if .Form.ID }}Kosongkan untuk mempertahankan password yang tersimpan.{{ else }}Kosongkan jika database tidak menggunakan password.{{ end }}</p>
+      </div>
+    </div>
+    <div class="connection-actions">
+      <button type="submit" class="btn btn-primary">{{ if .Form.ID }}Simpan perubahan{{ else }}Simpan koneksi{{ end }}</button>
+      {{ if .Form.ID }}<a href="/admin/connections" class="btn btn-secondary">Batal</a>{{ end }}
+    </div>
+  </form>
+</section>
+
+<section class="card" aria-labelledby="connections-list-title">
+  <div class="card-header"><h2 id="connections-list-title" class="card-title">Koneksi tersimpan</h2></div>
+  <div class="table-responsive">
+    <table class="data-table">
+      <thead><tr><th scope="col">Koneksi</th><th scope="col">Tipe DBMS</th><th scope="col">Host / Port</th><th scope="col">Database / Username</th><th scope="col">Aksi</th></tr></thead>
+      <tbody>
+        {{ range .Connections }}
+        <tr>
+          <td class="connection-name">{{ .Name }}</td>
+          <td>{{ if eq .DBMS "mysql" }}<span class="badge badge-dbms-mysql">MySQL</span>{{ else }}<span class="badge badge-dbms-postgres">PostgreSQL</span>{{ end }}</td>
+          <td><span class="connection-detail">{{ .Host }}</span><span class="connection-help">Port {{ .Port }}</span></td>
+          <td><span class="connection-detail">{{ .DBName }}</span><span class="connection-help">{{ .Username }}</span></td>
+          <td>
+            <div class="connection-actions">
+              <form action="/admin/connections/{{ .ID }}/test" method="POST"><input type="hidden" name="csrf_token" value="{{ $.CSRFToken }}"><button type="submit" class="btn btn-secondary btn-sm" aria-label="Uji koneksi {{ .Name }}">Uji Koneksi</button></form>
+              <a href="/admin/connections/{{ .ID }}/edit" class="btn btn-secondary btn-sm" aria-label="Edit koneksi {{ .Name }}">Edit</a>
+              <form action="/admin/connections/{{ .ID }}/delete" method="POST" data-confirm="Hapus koneksi '{{ .Name }}'? Semua hak akses group dan riwayat migration untuk koneksi ini juga akan dihapus."><input type="hidden" name="csrf_token" value="{{ $.CSRFToken }}"><button type="submit" class="btn btn-danger btn-sm" aria-label="Hapus koneksi {{ .Name }}">Hapus</button></form>
+            </div>
+          </td>
+        </tr>
+        {{ else }}
+        <tr><td colspan="5" class="connection-empty">Belum ada koneksi database. Tambahkan koneksi pertama melalui formulir di atas.</td></tr>
+        {{ end }}
+      </tbody>
+    </table>
+  </div>
+</section>
+{{ end }}

@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/access"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/admin"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/auth"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/config"
@@ -93,14 +94,24 @@ func loadTemplates(webDir string) (*TemplateMap, error) {
 		return nil, fmt.Errorf("failed to parse grants.html: %w", err)
 	}
 	tm.templates["grants.html"] = grantsTmpl
-
-	// 5. Databases template (cloned with layout)
-	dbPath := filepath.Join(webDir, "templates", "databases.html")
-	dbTmpl, err := template.ParseFiles(layoutPath, dbPath)
+	connectionsTmpl, err := template.ParseFiles(layoutPath, filepath.Join(webDir, "templates", "admin", "connections.html"))
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse databases.html: %w", err)
+		return nil, fmt.Errorf("failed to parse connections.html: %w", err)
 	}
-	tm.templates["databases.html"] = dbTmpl
+	tm.templates["connections.html"] = connectionsTmpl
+
+	for _, page := range []string{"list", "schema", "data", "explain"} {
+		t, err := template.ParseFiles(layoutPath, filepath.Join(webDir, "templates", "database", page+".html"))
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse database %s: %w", page, err)
+		}
+		tm.templates["database-"+page+".html"] = t
+	}
+	migrationTmpl, err := template.ParseFiles(layoutPath, filepath.Join(webDir, "templates", "migration", "editor.html"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse migration editor: %w", err)
+	}
+	tm.templates["migration-editor.html"] = migrationTmpl
 
 	return tm, nil
 }
@@ -166,6 +177,17 @@ func main() {
 		DB:        db,
 		Templates: templates,
 	}
+	connectionStore, err := database.NewConnectionStore(db, cfg.EncryptionKey)
+	if err != nil {
+		log.Fatalf("[FATAL] Credential encryption initialization failed: %v", err)
+	}
+	targetManager := database.NewTargetManager(connectionStore)
+	defer targetManager.Close()
+	connectionAdminHandler := &database.ConnectionAdminHandler{
+		Store: connectionStore, Manager: targetManager, Templates: templates,
+	}
+	viewerHandler := &database.ViewerHandler{Store: connectionStore, Manager: targetManager, Templates: templates}
+	explainHandler := &database.ExplainHandler{Store: connectionStore, Manager: targetManager, Templates: templates}
 
 	// 7. Middlewares
 	requireAuth := auth.RequireAuth(db, cfg.CookieSecure)
@@ -217,23 +239,21 @@ func main() {
 	mux.Handle("POST /admin/grants", protectAdmin(grantAdminHandler.AssignGrant))
 	mux.Handle("POST /admin/grants/delete", protectAdmin(grantAdminHandler.RevokeGrant))
 
-	// User Database Selection placeholder (ready for Anggota 2 handoff)
-	mux.Handle("GET /databases", protectUser(func(w http.ResponseWriter, r *http.Request) {
-		user := auth.GetUserFromContext(r.Context())
-		sess := auth.GetSessionFromContext(r.Context())
+	// Platform Admin: Target Connections
+	mux.Handle("GET /admin/connections", protectAdmin(connectionAdminHandler.ListConnections))
+	mux.Handle("POST /admin/connections", protectAdmin(connectionAdminHandler.CreateConnection))
+	mux.Handle("GET /admin/connections/{id}/edit", protectAdmin(connectionAdminHandler.ShowEdit))
+	mux.Handle("POST /admin/connections/{id}/edit", protectAdmin(connectionAdminHandler.EditConnection))
+	mux.Handle("POST /admin/connections/{id}/delete", protectAdmin(connectionAdminHandler.DeleteConnection))
+	mux.Handle("POST /admin/connections/{id}/test", protectAdmin(connectionAdminHandler.TestConnection))
 
-		data := map[string]interface{}{
-			"CurrentUser": user,
-			"CSRFToken":   sess.CSRFToken,
-			"ActiveTab":   "databases",
-		}
-
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := templates.ExecuteTemplate(w, "databases.html", data); err != nil {
-			log.Printf("Template render error on /databases: %v", err)
-			http.Error(w, "Error rendering page", http.StatusInternalServerError)
-		}
-	}))
+	mux.Handle("GET /databases", protectUser(viewerHandler.ListDatabases))
+	viewAccess := access.RequireDatabaseAccess(db, access.AccessViewOnly)
+	mux.Handle("GET /databases/{database_id}/schema", requireAuth(viewAccess(http.HandlerFunc(viewerHandler.ShowSchema))))
+	mux.Handle("GET /databases/{database_id}/data", requireAuth(viewAccess(http.HandlerFunc(viewerHandler.ShowData))))
+	mux.Handle("GET /databases/{database_id}/explain", requireAuth(viewAccess(http.HandlerFunc(explainHandler.Show))))
+	mux.Handle("GET /databases/{database_id}/migration", requireAuth(access.RequireDatabaseAccess(db, access.AccessViewEdit)(http.HandlerFunc(explainHandler.ShowMigrationDraft))))
+	mux.Handle("POST /databases/{database_id}/explain", requireAuth(database.LimitExplainBody(csrfProtection(viewAccess(http.HandlerFunc(explainHandler.Analyze))))))
 
 	// 9. Start HTTP Server with Graceful Shutdown
 	addr := ":" + cfg.Port

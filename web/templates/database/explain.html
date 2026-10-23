@@ -1,0 +1,36 @@
+{{ define "title" }}Analisis Query Plan - DB Platform{{ end }}
+{{ define "plan-node" }}
+<li class="plan-node">
+ <div class="plan-node-heading"><strong>{{ .Label }}</strong>{{ if .Relation }}<span>{{ .Relation }}</span>{{ end }}</div>
+ <dl class="plan-metrics">
+  <div><dt>Jenis scan</dt><dd>{{ if .Scan }}{{ .Scan }}{{ else }}Tidak tersedia{{ end }}</dd></div>
+  <div><dt>Indeks</dt><dd>{{ if .Index }}{{ .Index }}{{ else }}Tidak digunakan / tidak tersedia{{ end }}</dd></div>
+  <div><dt>Join</dt><dd>{{ if .Join }}{{ .Join }}{{ else }}Tidak ada{{ end }}</dd></div>
+  <div><dt>Cost estimasi</dt><dd>{{ .CostText }}</dd></div>
+  <div><dt>Baris estimasi</dt><dd>{{ .RowsText }}</dd></div>
+  <div><dt>Waktu aktual (ms)</dt><dd>{{ .ActualTimeText }}</dd></div>
+  <div><dt>Baris aktual</dt><dd>{{ .ActualRowsText }}</dd></div>
+ </dl>
+ {{ if .Children }}<ol class="plan-tree">{{ range .Children }}{{ template "plan-node" . }}{{ end }}</ol>{{ end }}
+</li>
+{{ end }}
+{{ define "content" }}
+<section class="database-page explain-page">
+ <a href="/databases" class="database-back">Kembali ke daftar database</a>
+ <div class="page-header"><div><h1>Analisis rencana query{{ if .Connection }}: {{ .Connection.Name }}{{ end }}</h1>{{ if .Connection }}<p class="text-secondary">{{ .Connection.DBName }} {{ if eq .Connection.DBMS "mysql" }}<span class="badge badge-dbms-mysql">MySQL</span>{{ else }}<span class="badge badge-dbms-postgres">PostgreSQL</span>{{ end }} · {{ if eq .Access "VIEW_EDIT" }}Lihat &amp; edit{{ else }}Lihat saja{{ end }}</p>{{ end }}</div>{{ if .Connection }}<nav class="connection-actions" aria-label="Tampilan database"><a class="btn btn-secondary" href="{{ .SchemaURL }}">Lihat skema</a><a class="btn btn-secondary" href="{{ .DataURL }}">Lihat data</a></nav>{{ end }}</div>
+ {{ if .Connection }}
+ <section class="card explain-form-card" aria-labelledby="explain-form-title">
+  <h2 id="explain-form-title">Buat rencana eksekusi</h2>
+  <p class="connection-help">Mode standar meminta optimizer memperkirakan rencana tanpa menjalankan query. Satu query data per analisis.</p>
+  <form action="{{ .ExplainURL }}" method="POST">
+   <input type="hidden" name="csrf_token" value="{{ .CSRFToken }}">
+   <div class="form-group"><label for="sql-query">Query SQL</label><textarea id="sql-query" name="sql_query" rows="9" maxlength="16384" required spellcheck="false" placeholder="SELECT * FROM nama_tabel WHERE id = 1">{{ .SQLQuery }}</textarea></div>
+   <div class="explain-choice"><label for="analyze-mode"><input id="analyze-mode" type="checkbox" name="analyze" value="1" {{ if .Analyze }}checked{{ end }} {{ if ne .Access "VIEW_EDIT" }}disabled{{ end }}> Jalankan ANALYZE untuk metrik aktual</label>{{ if ne .Access "VIEW_EDIT" }}<span class="connection-help">Memerlukan hak Lihat &amp; edit.</span>{{ end }}</div>
+   <div class="alert alert-danger explain-warning" id="analyze-warning"><p>{{ if eq .Connection.DBMS "mysql" }}MySQL ANALYZE hanya menerima SELECT. DML ditolak karena rollback tidak menjamin tabel nontransaksional.{{ else }}{{ .AnalyzeWarning }}{{ end }}</p><label for="confirm-analyze"><input id="confirm-analyze" type="checkbox" name="confirm_analyze" value="1" {{ if .ConfirmAnalyze }}checked{{ end }} {{ if ne .Access "VIEW_EDIT" }}disabled{{ end }}> Saya memahami bahwa ANALYZE mengeksekusi query.</label></div>
+   <button type="submit" class="btn btn-primary">Analisis query plan</button>
+  </form>
+ </section>
+ {{ if .Plan }}<section class="card explain-results" aria-labelledby="explain-result-title"><div class="database-section-header"><div><h2 id="explain-result-title">Rencana eksekusi</h2><p class="text-secondary">{{ .Plan.DBMS }} · {{ .Plan.Format }} · {{ if .Plan.Analyzed }}Mode ANALYZE{{ else }}Mode standar{{ end }}</p></div></div><ol class="plan-tree">{{ template "plan-node" .Plan.Root }}</ol><details class="explain-raw"><summary>Lihat hasil mentah {{ .Plan.Format }}</summary><pre><code>{{ .Plan.Raw }}</code></pre></details></section>{{ end }}
+ {{ end }}
+</section>
+{{ end }}

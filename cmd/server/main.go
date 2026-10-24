@@ -108,7 +108,7 @@ func loadTemplates(webDir string) (*TemplateMap, error) {
 		}
 		tm.templates["database-"+page+".html"] = t
 	}
-	for _, page := range []string{"editor", "history", "detail"} {
+	for _, page := range []string{"editor", "history", "detail", "diff"} {
 		t, err := template.ParseFiles(layoutPath, filepath.Join(webDir, "templates", "migration", page+".html"))
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse migration %s: %w", page, err)

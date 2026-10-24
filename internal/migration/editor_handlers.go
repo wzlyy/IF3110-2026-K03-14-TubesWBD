@@ -33,6 +33,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, requireAuth func(http.Handl
 		{"GET /databases/{database_id}/migration/{migration_id}", h.Detail},
 		{"POST /databases/{database_id}/migration/{migration_id}/retry", h.Retry},
 		{"POST /databases/{database_id}/migration/{migration_id}/reconcile", h.Reconcile},
+		{"GET /databases/{database_id}/diff", h.ShowDiff},
+		{"POST /databases/{database_id}/diff", h.ProcessDiff},
 	} {
 		mux.Handle(route.pattern, requireAuth(database.LimitExplainBody(auth.CSRFProtectionMiddleware(route.handler))))
 	}
@@ -66,7 +68,7 @@ func (h *Handler) page(w http.ResponseWriter, r *http.Request, edit bool) (map[s
 	base := "/databases/" + url.PathEscape(id)
 	data := map[string]any{"Connection": c, "Access": level, "CanEdit": level == access.AccessViewEdit,
 		"BaseURL": base + "/migration", "HistoryURL": base + "/migration/history", "ExplainURL": base + "/explain",
-		"SchemaURL": base + "/schema", "MySQLWarning": MySQLWarning, "DDLMessage": database.ExplainDDLMessage}
+		"SchemaURL": base + "/schema", "DiffURL": base + "/diff", "MySQLWarning": MySQLWarning, "DDLMessage": database.ExplainDDLMessage}
 	return data, true
 }
 

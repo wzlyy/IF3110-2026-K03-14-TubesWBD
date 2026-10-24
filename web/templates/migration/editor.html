@@ -1,30 +1,52 @@
 {{ define "title" }}Editor Migration - DB Platform{{ end }}
 {{ define "content" }}
 <section class="database-page">
- <a href="/databases" class="database-back">Kembali ke daftar database</a>
- <div class="page-header"><div><h1>Editor migration{{ if .Connection }}: {{ .Connection.Name }}{{ end }}</h1>{{ if .Connection }}<p class="text-secondary">{{ .Connection.DBName }} <span class="badge {{ if eq .Connection.DBMS "mysql" }}badge-dbms-mysql{{ else }}badge-dbms-postgres{{ end }}">{{ if eq .Connection.DBMS "mysql" }}MySQL{{ else }}PostgreSQL{{ end }}</span> · {{ if .CanEdit }}Lihat &amp; edit{{ else }}Akses terbatas{{ end }}</p>{{ end }}</div>{{ if .HistoryURL }}<a class="btn btn-secondary" href="{{ .HistoryURL }}">Riwayat migration</a>{{ end }}</div>
- {{ if .CanEdit }}
- {{ if eq .Connection.DBMS "mysql" }}<div class="alert alert-danger" role="note">Peringatan (MySQL): Perintah DDL dapat melakukan implicit commit. Kegagalan di tengah eksekusi DDL multi-statement tidak dapat di-rollback otomatis secara penuh.</div>{{ end }}
- <section class="card explain-form-card" aria-labelledby="migration-query-title">
-  <h2 id="migration-query-title">Susun dan tinjau SQL</h2>
-  <p class="connection-help" id="migration-query-help">DDL/DML, maksimum 16 KiB. Kontrol transaksi dikelola runner. Pratinjau tidak menjalankan atau menyimpan SQL.</p>
-  <form action="{{ .ExplainURL }}" method="POST">
-   <input type="hidden" name="csrf_token" value="{{ .CSRFToken }}">
-   <div class="form-group"><label for="migration-query">Query SQL migration</label><textarea id="migration-query" name="sql_query" rows="9" maxlength="16384" required spellcheck="false" aria-describedby="migration-query-help" placeholder="UPDATE nama_tabel SET nilai = 1 WHERE id = 1">{{ .SQLQuery }}</textarea></div>
-   <div class="connection-actions"><button type="submit" class="btn btn-primary" formaction="{{ .BaseURL }}/preview">Pratinjau SQL</button><button type="submit" class="btn btn-secondary">Analyze Query Plan</button></div>
-   <p class="connection-help">Analisis memakai EXPLAIN standar untuk satu SELECT/DML, tanpa mode ANALYZE. DDL tidak memiliki execution plan tabular; tetap dapat ditinjau dan dieksekusi sebagai migration.</p>
-  </form>
- </section>
- {{ if .Preview }}
- <section class="card migration-preview" aria-labelledby="preview-title">
-  <h2 id="preview-title">Pratinjau SQL</h2><p>{{ .StatementCount }} pernyataan SQL akan dijalankan pada <strong>{{ .Connection.Name }}</strong>.</p>
-  <pre class="migration-sql"><code>{{ .SQLQuery }}</code></pre>
-  <form action="{{ .BaseURL }}/execute" method="POST">
-   <input type="hidden" name="csrf_token" value="{{ .CSRFToken }}"><input type="hidden" name="sql_query" value="{{ .SQLQuery }}">
-   <button type="submit" class="btn btn-primary">Eksekusi SQL yang ditinjau</button>
-  </form>
- </section>
- {{ end }}
- {{ end }}
+    <a href="/databases" class="database-back">Kembali ke daftar database</a>
+    <div class="page-header">
+        <div>
+            <h1>Editor migration{{ if .Connection }}: {{ .Connection.Name }}{{ end }}</h1>{{ if .Connection }}<p
+                class="text-secondary">{{ .Connection.DBName }} <span class="badge {{ if eq .Connection.DBMS " mysql"
+                    }}badge-dbms-mysql{{ else }}badge-dbms-postgres{{ end }}">{{ if eq .Connection.DBMS "mysql"
+                    }}MySQL{{ else }}PostgreSQL{{ end }}</span> · {{ if .CanEdit }}Lihat &amp; edit{{ else }}Akses
+                terbatas{{ end }}</p>{{ end }}
+        </div>
+        <div class="connection-actions">{{ if .DiffURL }}<a class="btn btn-secondary" href="{{ .DiffURL }}">Schema
+                diff</a>{{ end }}{{ if .HistoryURL }}<a class="btn btn-secondary" href="{{ .HistoryURL }}">Riwayat
+                migration</a>{{ end }}</div>
+    </div>
+    {{ if .CanEdit }}
+    {{ if eq .Connection.DBMS "mysql" }}<div class="alert alert-danger" role="note">Peringatan (MySQL): Perintah DDL
+        dapat melakukan implicit commit. Kegagalan di tengah eksekusi DDL multi-statement tidak dapat di-rollback
+        otomatis secara penuh.</div>{{ end }}
+    <section class="card explain-form-card" aria-labelledby="migration-query-title">
+        <h2 id="migration-query-title">Susun dan tinjau SQL</h2>
+        <p class="connection-help" id="migration-query-help">DDL/DML, maksimum 16 KiB. Kontrol transaksi dikelola
+            runner. Pratinjau tidak menjalankan atau menyimpan SQL.</p>
+        <form action="{{ .ExplainURL }}" method="POST">
+            <input type="hidden" name="csrf_token" value="{{ .CSRFToken }}">
+            <div class="form-group"><label for="migration-query">Query SQL migration</label><textarea
+                    id="migration-query" name="sql_query" rows="9" maxlength="16384" required spellcheck="false"
+                    aria-describedby="migration-query-help"
+                    placeholder="UPDATE nama_tabel SET nilai = 1 WHERE id = 1">{{ .SQLQuery }}</textarea></div>
+            <div class="connection-actions"><button type="submit" class="btn btn-primary"
+                    formaction="{{ .BaseURL }}/preview">Pratinjau SQL</button><button type="submit"
+                    class="btn btn-secondary">Analyze Query Plan</button></div>
+            <p class="connection-help">Analisis memakai EXPLAIN standar untuk satu SELECT/DML, tanpa mode ANALYZE. DDL
+                tidak memiliki execution plan tabular; tetap dapat ditinjau dan dieksekusi sebagai migration.</p>
+        </form>
+    </section>
+    {{ if .Preview }}
+    <section class="card migration-preview" aria-labelledby="preview-title">
+        <h2 id="preview-title">Pratinjau SQL</h2>
+        <p>{{ .StatementCount }} pernyataan SQL akan dijalankan pada <strong>{{ .Connection.Name }}</strong>.</p>
+        <pre class="migration-sql"><code>{{ .SQLQuery }}</code></pre>
+        <form action="{{ .BaseURL }}/execute" method="POST">
+            <input type="hidden" name="csrf_token" value="{{ .CSRFToken }}"><input type="hidden" name="sql_query"
+                value="{{ .SQLQuery }}">
+            <button type="submit" class="btn btn-primary">Eksekusi SQL yang ditinjau</button>
+        </form>
+    </section>
+    {{ end }}
+    {{ end }}
 </section>
 {{ end }}

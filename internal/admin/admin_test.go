@@ -27,6 +27,9 @@ func (m *mockRenderer) ExecuteTemplate(w io.Writer, name string, data any) error
 }
 
 func setupTestDB(t *testing.T) *sql.DB {
+	if os.Getenv("WBD_TEST_DATABASES") != "1" {
+		t.Skip("use scripts/test-integration.ps1 with dedicated test databases")
+	}
 	os.Setenv("ENCRYPTION_KEY", "12345678901234567890123456789012")
 	cfg, err := config.Load()
 	if err != nil {

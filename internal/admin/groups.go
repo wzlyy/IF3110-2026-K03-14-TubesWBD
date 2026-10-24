@@ -145,7 +145,7 @@ func (h *GroupAdminHandler) EditGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err := h.DB.ExecContext(r.Context(), "UPDATE groups SET name = $1 WHERE id = $2", name, groupID)
+	err := requireAffected(h.DB.ExecContext(r.Context(), "UPDATE groups SET name = $1 WHERE id = $2", name, groupID))
 	if err != nil {
 		http.Redirect(w, r, "/admin/groups?error=Gagal+memperbarui+nama+group", http.StatusSeeOther)
 		return
@@ -163,29 +163,25 @@ func (h *GroupAdminHandler) DeleteGroup(w http.ResponseWriter, r *http.Request) 
 	}
 
 	ctx := r.Context()
-	// Find all members of this group before deleting
-	rows, err := h.DB.QueryContext(ctx, "SELECT user_id FROM user_groups WHERE group_id = $1", groupID)
-	var memberIDs []string
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var uid string
-			if err := rows.Scan(&uid); err == nil {
-				memberIDs = append(memberIDs, uid)
+	err := withTransaction(ctx, h.DB, func(tx *sql.Tx) error {
+		if err := lockGroup(ctx, tx, groupID); err != nil {
+			return err
+		}
+		memberIDs, err := groupMemberIDs(ctx, tx, groupID)
+		if err != nil {
+			return err
+		}
+		for _, uid := range memberIDs {
+			if err := auth.RevokeAllUserSessions(ctx, tx, uid); err != nil {
+				return err
 			}
 		}
-	}
-
-	// Delete the group (cascades to user_groups and group_database_grants)
-	_, err = h.DB.ExecContext(ctx, "DELETE FROM groups WHERE id = $1", groupID)
+		// The delete cascades to memberships and grants only after revocation succeeds.
+		return requireAffected(tx.ExecContext(ctx, "DELETE FROM groups WHERE id = $1", groupID))
+	})
 	if err != nil {
 		http.Redirect(w, r, "/admin/groups?error=Gagal+menghapus+group", http.StatusSeeOther)
 		return
-	}
-
-	// Access revocation: revoke sessions of affected members
-	for _, uid := range memberIDs {
-		_ = auth.RevokeAllUserSessions(ctx, h.DB, uid)
 	}
 
 	http.Redirect(w, r, "/admin/groups?success=Group+berhasil+dihapus", http.StatusSeeOther)
@@ -207,14 +203,24 @@ func (h *GroupAdminHandler) AddMember(w http.ResponseWriter, r *http.Request) {
 		VALUES ($1, $2)
 		ON CONFLICT (user_id, group_id) DO NOTHING
 	`
-	_, err := h.DB.ExecContext(ctx, query, userID, groupID)
+	err := withTransaction(ctx, h.DB, func(tx *sql.Tx) error {
+		if err := lockGroup(ctx, tx, groupID); err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, query, userID, groupID)
+		if err != nil {
+			return err
+		}
+		count, err := result.RowsAffected()
+		if err != nil || count == 0 {
+			return err // An existing membership is an idempotent success.
+		}
+		return auth.RotateUserSessions(ctx, tx, userID)
+	})
 	if err != nil {
 		http.Redirect(w, r, "/admin/groups?error=Gagal+menambahkan+anggota+ke+group", http.StatusSeeOther)
 		return
 	}
-
-	// Privilege escalation: rotate user session so their new grant takes effect smoothly
-	_ = auth.RotateUserSessions(ctx, h.DB, userID)
 
 	http.Redirect(w, r, "/admin/groups?success=Anggota+berhasil+ditambahkan+ke+group", http.StatusSeeOther)
 }
@@ -230,14 +236,19 @@ func (h *GroupAdminHandler) RemoveMember(w http.ResponseWriter, r *http.Request)
 	}
 
 	ctx := r.Context()
-	_, err := h.DB.ExecContext(ctx, "DELETE FROM user_groups WHERE user_id = $1 AND group_id = $2", userID, groupID)
+	err := withTransaction(ctx, h.DB, func(tx *sql.Tx) error {
+		if err := lockGroup(ctx, tx, groupID); err != nil {
+			return err
+		}
+		if err := requireAffected(tx.ExecContext(ctx, "DELETE FROM user_groups WHERE user_id = $1 AND group_id = $2", userID, groupID)); err != nil {
+			return err
+		}
+		return auth.RevokeAllUserSessions(ctx, tx, userID)
+	})
 	if err != nil {
 		http.Redirect(w, r, "/admin/groups?error=Gagal+menghapus+anggota+dari+group", http.StatusSeeOther)
 		return
 	}
-
-	// Access revocation: revoke all sessions of this user so they must log in again with updated privileges
-	_ = auth.RevokeAllUserSessions(ctx, h.DB, userID)
 
 	http.Redirect(w, r, "/admin/groups?success=Anggota+berhasil+dihapus+dari+group", http.StatusSeeOther)
 }

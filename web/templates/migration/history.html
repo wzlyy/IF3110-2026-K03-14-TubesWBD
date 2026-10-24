@@ -1,0 +1,12 @@
+{{ define "title" }}Riwayat Migration - DB Platform{{ end }}
+{{ define "content" }}
+<section class="database-page">
+ <a href="/databases" class="database-back">Kembali ke daftar database</a>
+ <div class="page-header"><div><h1>Riwayat migration{{ if .Connection }}: {{ .Connection.Name }}{{ end }}</h1><p class="text-secondary">Semua percobaan tersimpan. Versi resmi hanya bertambah setelah SUCCESS. Waktu ditampilkan dalam UTC.</p></div>{{ if .CanEdit }}<a class="btn btn-primary" href="{{ .BaseURL }}">Editor migration</a>{{ end }}</div>
+ {{ if .History }}
+ <div class="card database-scroll"><table class="data-table migration-history"><thead><tr><th>Versi</th><th>Mulai (UTC)</th><th>Pelaksana</th><th>SQL</th><th>Status</th><th>Aksi</th></tr></thead><tbody>
+ {{ range .History }}<tr><td>{{ .Version }}</td><td>{{ .StartedUTC }}</td><td>{{ .Executor }}</td><td><code>{{ .Snippet }}</code></td><td><span class="badge migration-status-{{ .Status }}">{{ .Status }}</span></td><td><div class="connection-actions"><a class="btn btn-secondary btn-sm" href="{{ $.BaseURL }}/{{ .ID }}">Detail</a>{{ if and $.CanEdit (eq .Status "PENDING") }}<form action="{{ $.BaseURL }}/{{ .ID }}/reconcile" method="POST"><input type="hidden" name="csrf_token" value="{{ $.CSRFToken }}"><button class="btn btn-secondary btn-sm" type="submit">Rekonsiliasi</button></form>{{ end }}</div></td></tr>{{ end }}
+ </tbody></table></div>
+ {{ else if not .ErrorMessage }}<div class="card database-empty"><h2>Belum ada riwayat migration</h2><p>Percobaan migration akan muncul setelah pengguna berizin mengeksekusi SQL.</p></div>{{ end }}
+</section>
+{{ end }}

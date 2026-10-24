@@ -165,6 +165,15 @@ func RunExplain(ctx context.Context, target *sql.DB, dbms, query string, analyze
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	if dbms == "mysql" {
+		var name string
+		if err := target.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&name); err != nil {
+			return nil, ErrExplainUnavailable
+		}
+		if err := ValidateMySQLScope(ctx, target, name); err != nil {
+			return nil, err
+		}
+	}
 	statement := ""
 	switch dbms {
 	case "postgres":

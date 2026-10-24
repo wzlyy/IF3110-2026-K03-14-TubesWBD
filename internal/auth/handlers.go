@@ -122,7 +122,7 @@ func (h *AuthHandler) ProcessLogin(w http.ResponseWriter, r *http.Request) {
 	// Create new session (opaque token)
 	sess, err := CreateSession(r.Context(), h.DB, userID)
 	if err != nil {
-		log.Printf("Failed to create user session: %v", err)
+		log.Print("Failed to create user session")
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
@@ -141,7 +141,10 @@ func (h *AuthHandler) ProcessLogin(w http.ResponseWriter, r *http.Request) {
 // ProcessLogout terminates the active session in DB and clears the cookie.
 func (h *AuthHandler) ProcessLogout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(CookieSessionName); err == nil && cookie.Value != "" {
-		_ = RevokeSession(r.Context(), h.DB, cookie.Value)
+		if err := RevokeSession(r.Context(), h.DB, cookie.Value); err != nil {
+			http.Error(w, "Logout tidak dapat disimpan. Silakan coba kembali.", http.StatusServiceUnavailable)
+			return
+		}
 	}
 
 	ClearSessionCookie(w, h.SecureCookie)

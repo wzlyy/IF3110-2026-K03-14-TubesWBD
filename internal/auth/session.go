@@ -26,14 +26,15 @@ var (
 
 // Session represents an authenticated user's session in the backend.
 type Session struct {
-	ID           string
-	UserID       string
-	CreatedAt    time.Time
-	LastActiveAt time.Time
-	ExpiresAt    time.Time
-	PreviousID   sql.NullString
-	GraceUntil   sql.NullTime
-	CSRFToken    string
+	ID            string
+	UserID        string
+	CreatedAt     time.Time
+	LastActiveAt  time.Time
+	LastRotatedAt time.Time
+	ExpiresAt     time.Time
+	PreviousID    sql.NullString
+	GraceUntil    sql.NullTime
+	CSRFToken     string
 }
 
 // GenerateOpaqueToken generates a cryptographically secure random opaque token (32 bytes = 64 hex characters).
@@ -62,8 +63,8 @@ func CreateSession(ctx context.Context, db *sql.DB, userID string) (*Session, er
 	expiresAt := now.Add(AbsoluteTimeout)
 
 	query := `
-		INSERT INTO sessions (id, user_id, created_at, last_active_at, expires_at, csrf_token)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO sessions (id, user_id, created_at, last_active_at, expires_at, csrf_token,last_rotated_at)
+		VALUES ($1, $2, $3, $4, $5, $6,$3)
 	`
 
 	_, err = db.ExecContext(ctx, query, token, userID, now, now, expiresAt, csrfToken)
@@ -72,12 +73,13 @@ func CreateSession(ctx context.Context, db *sql.DB, userID string) (*Session, er
 	}
 
 	return &Session{
-		ID:           token,
-		UserID:       userID,
-		CreatedAt:    now,
-		LastActiveAt: now,
-		ExpiresAt:    expiresAt,
-		CSRFToken:    csrfToken,
+		ID:            token,
+		UserID:        userID,
+		CreatedAt:     now,
+		LastActiveAt:  now,
+		LastRotatedAt: now,
+		ExpiresAt:     expiresAt,
+		CSRFToken:     csrfToken,
 	}, nil
 }
 
@@ -91,14 +93,17 @@ func GetSession(ctx context.Context, db *sql.DB, token string) (*Session, bool, 
 
 	now := time.Now().UTC()
 
-	// Query by either current ID or previous ID
+	// Resolve every grace token directly to the canonical session. The immediate
+	// previous token still uses sessions.grace_until for legacy compatibility.
 	query := `
-		SELECT id, user_id, created_at, last_active_at, expires_at, previous_id, grace_until, csrf_token
-		FROM sessions
-		WHERE id = $1 OR previous_id = $1
+		SELECT s.id, s.user_id, s.created_at, s.last_active_at, s.expires_at, s.previous_id, s.grace_until, s.csrf_token,s.last_rotated_at,g.expires_at
+		FROM sessions s
+		LEFT JOIN session_grace_tokens g ON g.session_id=s.id AND g.token=$1
+		WHERE s.id = $1 OR s.previous_id = $1 OR g.token = $1
 	`
 
 	var s Session
+	var aliasExpiresAt sql.NullTime
 	err := db.QueryRowContext(ctx, query, token).Scan(
 		&s.ID,
 		&s.UserID,
@@ -108,6 +113,8 @@ func GetSession(ctx context.Context, db *sql.DB, token string) (*Session, bool, 
 		&s.PreviousID,
 		&s.GraceUntil,
 		&s.CSRFToken,
+		&s.LastRotatedAt,
+		&aliasExpiresAt,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -115,6 +122,7 @@ func GetSession(ctx context.Context, db *sql.DB, token string) (*Session, bool, 
 		}
 		return nil, false, fmt.Errorf("session query error: %w", err)
 	}
+	_, _ = db.ExecContext(ctx, "DELETE FROM session_grace_tokens WHERE session_id=$1 AND expires_at<=$2", s.ID, now)
 
 	// 1. Check Absolute Expiration (8 hours from creation)
 	if now.After(s.ExpiresAt) {
@@ -129,11 +137,13 @@ func GetSession(ctx context.Context, db *sql.DB, token string) (*Session, bool, 
 	}
 
 	// 3. Check if the token presented was the previous (grace period) token
-	wasPrevious := false
-	if s.PreviousID.Valid && s.PreviousID.String == token {
-		wasPrevious = true
-		// Verify if grace period is still valid
-		if !s.GraceUntil.Valid || now.After(s.GraceUntil.Time) {
+	wasPrevious := token != s.ID
+	if wasPrevious {
+		deadline := aliasExpiresAt
+		if s.PreviousID.Valid && s.PreviousID.String == token {
+			deadline = s.GraceUntil
+		}
+		if !deadline.Valid || !now.Before(deadline.Time) {
 			// Grace period expired for old token
 			return nil, false, ErrSessionExpired
 		}
@@ -150,8 +160,9 @@ func GetSession(ctx context.Context, db *sql.DB, token string) (*Session, bool, 
 }
 
 // RotateSession rotates the session identifier while keeping created_at and expires_at unchanged.
-// The current token becomes previous_id with a 30-second grace period.
-func RotateSession(ctx context.Context, db *sql.DB, currentToken string) (*Session, error) {
+// Each rotated token retains its own 30-second grace period, including when
+// another rotation happens before that grace period ends.
+func RotateSession(ctx context.Context, db SessionStore, currentToken string) (*Session, error) {
 	newToken, err := GenerateOpaqueToken()
 	if err != nil {
 		return nil, err
@@ -160,14 +171,44 @@ func RotateSession(ctx context.Context, db *sql.DB, currentToken string) (*Sessi
 	now := time.Now().UTC()
 	graceUntil := now.Add(GracePeriod)
 
+	// Permission changes already supply their transaction. Standalone rotations
+	// must also commit the canonical identifier and grace tokens together.
+	var tx *sql.Tx
+	if pool, ok := db.(*sql.DB); ok {
+		tx, err = pool.BeginTx(ctx, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to begin session rotation: %w", err)
+		}
+		defer tx.Rollback()
+		db = tx
+	}
+	var previousID sql.NullString
+	var previousDeadline sql.NullTime
+	if err := db.QueryRowContext(ctx, "SELECT previous_id,grace_until FROM sessions WHERE id=$1 FOR UPDATE", currentToken).Scan(&previousID, &previousDeadline); err != nil {
+		return nil, fmt.Errorf("failed to lock session for rotation: %w", err)
+	}
+	// Keep a pre-upgrade previous token, and honor a shortened legacy deadline
+	// before it becomes an older alias on this rotation.
+	if previousID.Valid {
+		if previousDeadline.Valid {
+			if _, err := db.ExecContext(ctx, `INSERT INTO session_grace_tokens(token,session_id,expires_at) VALUES($1,$2,$3)
+				ON CONFLICT(token) DO UPDATE SET expires_at=LEAST(session_grace_tokens.expires_at,EXCLUDED.expires_at)`, previousID.String, currentToken, previousDeadline.Time); err != nil {
+				return nil, fmt.Errorf("failed to preserve previous session grace: %w", err)
+			}
+		} else if _, err := db.ExecContext(ctx, "DELETE FROM session_grace_tokens WHERE token=$1 AND session_id=$2", previousID.String, currentToken); err != nil {
+			return nil, fmt.Errorf("failed to discard invalid previous session grace: %w", err)
+		}
+	}
+
 	query := `
 		UPDATE sessions
 		SET previous_id = id,
 		    id = $1,
 		    grace_until = $2,
-		    last_active_at = $3
+		    last_active_at = $3,
+		    last_rotated_at = $3
 		WHERE id = $4
-		RETURNING id, user_id, created_at, last_active_at, expires_at, previous_id, grace_until, csrf_token
+		RETURNING id, user_id, created_at, last_active_at, expires_at, previous_id, grace_until, csrf_token,last_rotated_at
 	`
 
 	var s Session
@@ -180,16 +221,28 @@ func RotateSession(ctx context.Context, db *sql.DB, currentToken string) (*Sessi
 		&s.PreviousID,
 		&s.GraceUntil,
 		&s.CSRFToken,
+		&s.LastRotatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to rotate session: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, "INSERT INTO session_grace_tokens(token,session_id,expires_at) VALUES($1,$2,$3)", currentToken, s.ID, graceUntil); err != nil {
+		return nil, fmt.Errorf("failed to retain rotated session grace: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, "DELETE FROM session_grace_tokens WHERE session_id=$1 AND expires_at<=$2", s.ID, now); err != nil {
+		return nil, fmt.Errorf("failed to clean expired session grace: %w", err)
+	}
+	if tx != nil {
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("failed to commit session rotation: %w", err)
+		}
 	}
 
 	return &s, nil
 }
 
 // RotateUserSessions rotates all active sessions for a user (used upon privilege escalation).
-func RotateUserSessions(ctx context.Context, db *sql.DB, userID string) error {
+func RotateUserSessions(ctx context.Context, db SessionStore, userID string) error {
 	rows, err := db.QueryContext(ctx, "SELECT id FROM sessions WHERE user_id = $1", userID)
 	if err != nil {
 		return err
@@ -199,26 +252,36 @@ func RotateUserSessions(ctx context.Context, db *sql.DB, userID string) error {
 	var tokens []string
 	for rows.Next() {
 		var tok string
-		if err := rows.Scan(&tok); err == nil {
-			tokens = append(tokens, tok)
+		if err := rows.Scan(&tok); err != nil {
+			return err
 		}
+		tokens = append(tokens, tok)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
 	}
 
 	for _, tok := range tokens {
-		_, _ = RotateSession(ctx, db, tok)
+		if _, err := RotateSession(ctx, db, tok); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-// RevokeSession deletes a single session by its current or previous identifier.
+// RevokeSession deletes a canonical session and all grace tokens through any identifier.
 func RevokeSession(ctx context.Context, db *sql.DB, token string) error {
-	query := `DELETE FROM sessions WHERE id = $1 OR previous_id = $1`
+	query := `DELETE FROM sessions WHERE id = $1 OR previous_id = $1
+		OR id IN (SELECT session_id FROM session_grace_tokens WHERE token=$1)`
 	_, err := db.ExecContext(ctx, query, token)
 	return err
 }
 
 // RevokeAllUserSessions revokes all sessions for a specific user (used upon privilege revocation).
-func RevokeAllUserSessions(ctx context.Context, db *sql.DB, userID string) error {
+func RevokeAllUserSessions(ctx context.Context, db SessionStore, userID string) error {
 	query := `DELETE FROM sessions WHERE user_id = $1`
 	_, err := db.ExecContext(ctx, query, userID)
 	return err

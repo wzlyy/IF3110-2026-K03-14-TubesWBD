@@ -19,3 +19,16 @@ func TestEncryptionKeyContract(t *testing.T) {
 		t.Fatalf("valid key rejected: %v", err)
 	}
 }
+
+func TestProductionSessionCookieCannotBeWeakened(t *testing.T) {
+	t.Setenv("ENCRYPTION_KEY", strings.Repeat("x", 32))
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("COOKIE_SECURE", "false")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.CookieSecure {
+		t.Fatal("production cookies must remain Secure even when COOKIE_SECURE=false")
+	}
+}

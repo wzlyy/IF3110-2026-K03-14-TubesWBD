@@ -47,13 +47,13 @@ func (c *PlatformDBConfig) DSN() string {
 
 // Config represents all application configuration parameters.
 type Config struct {
-	Port                  string
-	AppEnv                string
-	EncryptionKey         string
-	AdminInitialUsername  string
-	AdminInitialPassword  string
-	PlatformDB            PlatformDBConfig
-	CookieSecure          bool
+	Port                 string
+	AppEnv               string
+	EncryptionKey        string
+	AdminInitialUsername string
+	AdminInitialPassword string
+	PlatformDB           PlatformDBConfig
+	CookieSecure         bool
 }
 
 // IsProduction returns true if the current environment is production.
@@ -85,7 +85,7 @@ func Load() (*Config, error) {
 	}
 
 	adminUser := getEnv("ADMIN_INITIAL_USERNAME", "admin")
-	adminPass := getEnv("ADMIN_INITIAL_PASSWORD", "Admin@Secure123!")
+	adminPass := os.Getenv("ADMIN_INITIAL_PASSWORD")
 
 	dbPortStr := getEnv("PLATFORM_DB_PORT", "5432")
 	dbPort, err := strconv.Atoi(dbPortStr)
@@ -94,7 +94,7 @@ func Load() (*Config, error) {
 	}
 
 	cookieSecure := appEnv == "production"
-	if secureEnv := os.Getenv("COOKIE_SECURE"); secureEnv != "" {
+	if secureEnv := os.Getenv("COOKIE_SECURE"); secureEnv != "" && appEnv != "production" {
 		cookieSecure = secureEnv == "true" || secureEnv == "1"
 	}
 

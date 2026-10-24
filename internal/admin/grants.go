@@ -2,6 +2,7 @@ package admin
 
 import (
 	"database/sql"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -131,61 +132,51 @@ func (h *GrantAdminHandler) AssignGrant(w http.ResponseWriter, r *http.Request) 
 
 	ctx := r.Context()
 
-	// Check previous grant level if any
-	var previousRawLevel string
-	var hasPrevious bool
-	err := h.DB.QueryRowContext(ctx, `
-		SELECT access_level FROM group_database_grants
-		WHERE group_id = $1 AND database_id = $2
-	`, groupID, databaseID).Scan(&previousRawLevel)
-	if err == nil {
-		hasPrevious = true
-	}
-
 	query := `
 		INSERT INTO group_database_grants (group_id, database_id, access_level)
 		VALUES ($1, $2, $3)
 		ON CONFLICT (group_id, database_id)
 		DO UPDATE SET access_level = EXCLUDED.access_level
 	`
-	_, err = h.DB.ExecContext(ctx, query, groupID, databaseID, string(targetLevel))
+	err := withTransaction(ctx, h.DB, func(tx *sql.Tx) error {
+		if err := lockGroup(ctx, tx, groupID); err != nil {
+			return err
+		}
+		var previousRawLevel string
+		err := tx.QueryRowContext(ctx, `
+			SELECT access_level FROM group_database_grants
+			WHERE group_id = $1 AND database_id = $2
+		`, groupID, databaseID).Scan(&previousRawLevel)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		previousLevel := access.ParseAccessLevel(previousRawLevel)
+		if err := requireAffected(tx.ExecContext(ctx, query, groupID, databaseID, string(targetLevel))); err != nil {
+			return err
+		}
+		if targetLevel == previousLevel {
+			return nil
+		}
+		memberIDs, err := groupMemberIDs(ctx, tx, groupID)
+		if err != nil {
+			return err
+		}
+		for _, uid := range memberIDs {
+			if access.IsHigherOrEqual(targetLevel, previousLevel) {
+				err = auth.RotateUserSessions(ctx, tx, uid)
+			} else {
+				err = auth.RevokeAllUserSessions(ctx, tx, uid)
+			}
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		log.Printf("Failed to assign grant: %v", err)
+		log.Print("Failed to assign grant and session changes")
 		http.Redirect(w, r, "/admin/grants?error=Gagal+menyimpan+hak+akses+database", http.StatusSeeOther)
 		return
-	}
-
-	// Fetch all members of this group
-	mRows, err := h.DB.QueryContext(ctx, "SELECT user_id FROM user_groups WHERE group_id = $1", groupID)
-	var memberIDs []string
-	if err == nil {
-		defer mRows.Close()
-		for mRows.Next() {
-			var uid string
-			if err := mRows.Scan(&uid); err == nil {
-				memberIDs = append(memberIDs, uid)
-			}
-		}
-	}
-
-	if hasPrevious {
-		prevLevel := access.ParseAccessLevel(previousRawLevel)
-		if access.IsHigherOrEqual(targetLevel, prevLevel) {
-			// Privilege escalation: rotate sessions smoothly
-			for _, uid := range memberIDs {
-				_ = auth.RotateUserSessions(ctx, h.DB, uid)
-			}
-		} else {
-			// Privilege demotion: revoke sessions to force re-login
-			for _, uid := range memberIDs {
-				_ = auth.RevokeAllUserSessions(ctx, h.DB, uid)
-			}
-		}
-	} else {
-		// New grant given (escalation)
-		for _, uid := range memberIDs {
-			_ = auth.RotateUserSessions(ctx, h.DB, uid)
-		}
 	}
 
 	http.Redirect(w, r, "/admin/grants?success=Hak+akses+database+berhasil+disimpan", http.StatusSeeOther)
@@ -202,28 +193,27 @@ func (h *GrantAdminHandler) RevokeGrant(w http.ResponseWriter, r *http.Request) 
 	}
 
 	ctx := r.Context()
-	// Fetch group members before revoking
-	mRows, err := h.DB.QueryContext(ctx, "SELECT user_id FROM user_groups WHERE group_id = $1", groupID)
-	var memberIDs []string
-	if err == nil {
-		defer mRows.Close()
-		for mRows.Next() {
-			var uid string
-			if err := mRows.Scan(&uid); err == nil {
-				memberIDs = append(memberIDs, uid)
+	err := withTransaction(ctx, h.DB, func(tx *sql.Tx) error {
+		if err := lockGroup(ctx, tx, groupID); err != nil {
+			return err
+		}
+		memberIDs, err := groupMemberIDs(ctx, tx, groupID)
+		if err != nil {
+			return err
+		}
+		if err := requireAffected(tx.ExecContext(ctx, "DELETE FROM group_database_grants WHERE group_id = $1 AND database_id = $2", groupID, databaseID)); err != nil {
+			return err
+		}
+		for _, uid := range memberIDs {
+			if err := auth.RevokeAllUserSessions(ctx, tx, uid); err != nil {
+				return err
 			}
 		}
-	}
-
-	_, err = h.DB.ExecContext(ctx, "DELETE FROM group_database_grants WHERE group_id = $1 AND database_id = $2", groupID, databaseID)
+		return nil
+	})
 	if err != nil {
 		http.Redirect(w, r, "/admin/grants?error=Gagal+mencabut+hak+akses+database", http.StatusSeeOther)
 		return
-	}
-
-	// Access revocation: revoke all sessions of affected members
-	for _, uid := range memberIDs {
-		_ = auth.RevokeAllUserSessions(ctx, h.DB, uid)
 	}
 
 	http.Redirect(w, r, "/admin/grants?success=Hak+akses+database+berhasil+dicabut", http.StatusSeeOther)

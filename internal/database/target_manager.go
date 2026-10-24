@@ -171,11 +171,21 @@ func (m *TargetManager) Close() error {
 func (m *TargetManager) Test(ctx context.Context, id string) error {
 	ctx, cancel := context.WithTimeout(ctx, targetTimeout)
 	defer cancel()
-	db, _, err := m.Open(ctx, id)
+	db, dbms, err := m.Open(ctx, id)
 	if err != nil {
 		return sanitizeConnectionError(err)
 	}
-	return sanitizeConnectionError(db.PingContext(ctx))
+	if err := db.PingContext(ctx); err != nil {
+		return sanitizeConnectionError(err)
+	}
+	if dbms == "mysql" {
+		c, err := m.store.Get(ctx, id)
+		if err != nil {
+			return sanitizeConnectionError(err)
+		}
+		return ValidateMySQLScope(ctx, db, c.DBName)
+	}
+	return nil
 }
 
 // sanitizeConnectionError keeps driver details and credentials out of responses.

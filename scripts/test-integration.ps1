@@ -1,0 +1,25 @@
+param([string]$Package = './...', [string]$Run = '.')
+$ErrorActionPreference = 'Stop'
+$env:WBD_TEST_DATABASES = '1'
+$env:APP_ENV = 'test'
+# Must match compose.test.yaml. Never point foundation tests at application data.
+$env:ENCRYPTION_KEY = '0123456789abcdef0123456789abcdef'
+$env:PLATFORM_DB_HOST = '127.0.0.1'
+$env:PLATFORM_DB_PORT = '15432'
+$env:PLATFORM_DB_USER = 'postgres'
+$env:PLATFORM_DB_PASSWORD = 'test-password'
+$env:PLATFORM_DB_NAME = 'platform_test'
+$env:TARGET_PG_HOST = '127.0.0.1'
+$env:TARGET_PG_PORT = '15433'
+$env:TARGET_PG_USER = 'postgres'
+$env:TARGET_PG_PASSWORD = 'test-password'
+$env:TARGET_PG_NAME = 'target_test'
+$env:TARGET_MYSQL_HOST = '127.0.0.1'
+$env:TARGET_MYSQL_PORT = '13306'
+$env:TARGET_MYSQL_USER = 'target_user'
+$env:TARGET_MYSQL_PASSWORD = 'test-password'
+$env:TARGET_MYSQL_ADMIN_USER = 'root'
+$env:TARGET_MYSQL_ADMIN_PASSWORD = 'test-password'
+$env:TARGET_MYSQL_NAME = 'target_test'
+go test -p 1 -count=1 -v -tags=integration -run $Run $Package
+exit $LASTEXITCODE

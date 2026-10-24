@@ -12,6 +12,30 @@ import (
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/config"
 )
 
+const migrationCoreSQL = `
+ALTER TABLE migrations ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
+ALTER TABLE migrations ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ;
+ALTER TABLE migrations ADD COLUMN IF NOT EXISTS partial_changes BOOLEAN NOT NULL DEFAULT FALSE;
+UPDATE migrations SET started_at=executed_at WHERE started_at IS NULL;
+ALTER TABLE migrations ALTER COLUMN started_at SET DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE migrations ALTER COLUMN started_at SET NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_migrations_success_version
+ ON migrations(database_id, version) WHERE status='SUCCESS';
+`
+
+const sessionGraceTokensSQL = `
+CREATE TABLE IF NOT EXISTS session_grace_tokens (
+    token VARCHAR(128) PRIMARY KEY,
+    session_id VARCHAR(128) NOT NULL REFERENCES sessions(id) ON UPDATE CASCADE ON DELETE CASCADE,
+    expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_session_grace_tokens_session ON session_grace_tokens(session_id);
+INSERT INTO session_grace_tokens(token, session_id, expires_at)
+SELECT previous_id, id, grace_until FROM sessions
+WHERE previous_id IS NOT NULL AND grace_until > CURRENT_TIMESTAMP
+ON CONFLICT (token) DO UPDATE SET expires_at=LEAST(session_grace_tokens.expires_at, EXCLUDED.expires_at);
+`
+
 const defaultInitPlatformSQL = `
 CREATE TABLE IF NOT EXISTS users (
     id VARCHAR(36) PRIMARY KEY,
@@ -116,7 +140,7 @@ func NewPlatformDB(cfg *config.Config) (*sql.DB, error) {
 	return db, nil
 }
 
-// MigratePlatformDB applies the initial schema migration idempotently.
+// MigratePlatformDB applies the initial schema and additive upgrades idempotently.
 func MigratePlatformDB(ctx context.Context, db *sql.DB) error {
 	sqlContent := defaultInitPlatformSQL
 
@@ -136,6 +160,18 @@ func MigratePlatformDB(ctx context.Context, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, sqlContent)
 	if err != nil {
 		return fmt.Errorf("failed to execute platform database migration: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, migrationCoreSQL); err != nil {
+		return fmt.Errorf("failed to upgrade migration metadata: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_rotated_at TIMESTAMPTZ;
+UPDATE sessions SET last_rotated_at=created_at WHERE last_rotated_at IS NULL;
+ALTER TABLE sessions ALTER COLUMN last_rotated_at SET DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE sessions ALTER COLUMN last_rotated_at SET NOT NULL;`); err != nil {
+		return fmt.Errorf("failed to upgrade session rotation clock: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, sessionGraceTokensSQL); err != nil {
+		return fmt.Errorf("failed to upgrade session grace tokens: %w", err)
 	}
 
 	return nil

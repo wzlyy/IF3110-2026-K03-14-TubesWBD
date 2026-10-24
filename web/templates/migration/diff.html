@@ -1,0 +1,158 @@
+{{ define "title" }}Schema Diff & Generator - DB Platform{{ end }}
+{{ define "content" }}
+<section class="database-page">
+  <a href="/databases" class="database-back">Kembali ke daftar database</a>
+  <div class="page-header">
+    <div>
+      <h1>Schema Diff &amp; Generator{{ if .Connection }}: {{ .Connection.Name }}{{ end }}</h1>
+      {{ if .Connection }}
+      <p class="text-secondary">{{ .Connection.DBName }} <span class="badge {{ if eq .Connection.DBMS " mysql"
+          }}badge-dbms-mysql{{ else }}badge-dbms-postgres{{ end }}">{{ if eq .Connection.DBMS "mysql" }}MySQL{{ else
+          }}PostgreSQL{{ end }}</span> · {{ if .CanEdit }}Lihat &amp; edit{{ else }}Akses terbatas (Lihat saja){{ end }}
+      </p>
+      {{ end }}
+    </div>
+    <div class="connection-actions">
+      <a class="btn btn-secondary" href="/databases/{{ .Connection.ID }}/schema">Lihat Skema</a>
+      <a class="btn btn-secondary" href="/databases/{{ .Connection.ID }}/migration/history">Riwayat Migration</a>
+    </div>
+  </div>
+
+  {{ if .ErrorMessage }}
+  <div class="alert alert-danger" role="alert">{{ .ErrorMessage }}</div>
+  {{ end }}
+
+  <section class="card explain-form-card" aria-labelledby="diff-form-title">
+    <h2 id="diff-form-title">Bandingkan Skema Aktual dengan Skema Tujuan</h2>
+    <p class="connection-help">Masukkan definisi skema target dalam format JSON (atau unggah berkas JSON). Sistem akan
+      menganalisis perbedaan struktur tabel, kolom, constraint, dan indeks, lalu menghasilkan kandidat query SQL DDL.
+    </p>
+
+    <form action="{{ .DiffURL }}" method="POST" enctype="multipart/form-data">
+      <input type="hidden" name="csrf_token" value="{{ .CSRFToken }}">
+
+      <div class="form-group">
+        <label for="target_schema_json">Definisi Skema Tujuan (JSON)</label>
+        <textarea id="target_schema_json" name="target_schema_json" rows="10" required spellcheck="false" placeholder='{
+  "tables": [
+    {
+      "name": "nama_tabel",
+      "columns": [
+        { "name": "id", "type": "integer", "nullable": false },
+        { "name": "nama", "type": "varchar(255)", "nullable": false }
+      ],
+      "primary_key": ["id"]
+    }
+  ]
+}'>{{ .RawInputJSON }}</textarea>
+        <p class="connection-help">Format JSON mendukung daftar <code>tables</code> yang berisi kolom, primary key,
+          constraint, dan indeks.</p>
+      </div>
+
+      <div class="form-group">
+        <label for="schema_file">Atau Unggah Berkas JSON (Opsional)</label>
+        <input type="file" id="schema_file" name="schema_file" accept=".json,application/json" class="form-control"
+          style="background: var(--bg-card); border: 1px solid var(--border-subtle); color: var(--text-primary); padding: 0.5rem; border-radius: var(--radius-sm);">
+      </div>
+
+      <div class="connection-actions">
+        <button type="submit" class="btn btn-primary">Analisis Perbedaan Skema</button>
+      </div>
+    </form>
+  </section>
+
+  {{ if .DiffPerformed }}
+  {{ if .DiffResult.IsIdentical }}
+  <section class="card" style="margin-top: 1.5rem; border-left: 4px solid var(--success, #10b981);">
+    <h2 style="color: var(--text-primary); font-size: 1.15rem; margin-bottom: 0.5rem;">Hasil Analisis: Skema Identik
+    </h2>
+    <p class="text-secondary" style="margin: 0;">Skema database target saat ini sudah sepenuhnya sesuai dengan definisi
+      skema tujuan. Tidak ada perubahan struktur (DDL) yang diperlukan.</p>
+  </section>
+  {{ else }}
+  <section class="card" style="margin-top: 1.5rem;" aria-labelledby="diff-results-title">
+    <div class="database-section-header">
+      <h2 id="diff-results-title">Ringkasan Perbedaan Struktur Skema</h2>
+      <span class="badge badge-user">{{ len .DiffResult.Changes }} Perubahan Terdeteksi</span>
+    </div>
+
+    {{ if .HasDestructive }}
+    <div class="alert alert-danger" role="note" style="margin-bottom: 1rem;">
+      <strong>Peringatan:</strong> Terdapat perubahan <strong>destruktif</strong> (penghapusan tabel, kolom, atau
+      indeks). Data pada objek yang dihapus dapat hilang jika dieksekusi.
+    </div>
+    {{ end }}
+
+    <div class="database-scroll">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th style="width: 140px;">Jenis Aksi</th>
+            <th>Objek / Tabel</th>
+            <th>Keterangan Perubahan</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{ range .DiffResult.Changes }}
+          <tr>
+            <td>
+              {{ if .Destructive }}
+              <span class="badge"
+                style="background: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3);">{{
+                .Action }}</span>
+              {{ else if eq .Action "MODIFY_COLUMN" }}
+              <span class="badge"
+                style="background: rgba(245, 158, 11, 0.15); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3);">{{
+                .Action }}</span>
+              {{ else }}
+              <span class="badge"
+                style="background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3);">{{
+                .Action }}</span>
+              {{ end }}
+            </td>
+            <td>
+              <strong>{{ .Schema }}.{{ .Table }}</strong>
+              {{ if .Object }}<br><code style="font-size: 0.85rem;">{{ .Object }}</code>{{ end }}
+            </td>
+            <td style="font-size: 0.9rem;">
+              {{ .Description }}
+              {{ if and .OldValue .NewValue }}
+              <div style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.25rem;">
+                <span style="text-decoration: line-through;">{{ .OldValue }}</span> &rarr; <span
+                  style="color: var(--text-primary); font-weight: 500;">{{ .NewValue }}</span>
+              </div>
+              {{ end }}
+            </td>
+          </tr>
+          {{ end }}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card migration-preview" style="margin-top: 1.5rem;" aria-labelledby="generated-sql-title">
+    <h2 id="generated-sql-title">Kandidat Query DDL yang Dihasilkan</h2>
+    <p class="connection-help">Query DDL di bawah ini dihasilkan secara otomatis berdasarkan dialek <strong>{{
+        .Connection.DBMS }}</strong> dan telah diurutkan berdasarkan dependensi objek.</p>
+
+    <pre class="migration-sql"><code>{{ .GeneratedSQL }}</code></pre>
+
+    {{ if .CanEdit }}
+    <form action="{{ .PreviewURL }}" method="POST" style="margin-top: 1rem;">
+      <input type="hidden" name="csrf_token" value="{{ .CSRFToken }}">
+      <input type="hidden" name="sql_query" value="{{ .GeneratedSQL }}">
+      <div class="connection-actions">
+        <button type="submit" class="btn btn-primary">Bawa SQL ke Editor Migration</button>
+      </div>
+      <p class="connection-help" style="margin-top: 0.5rem;">Menekan tombol ini akan memindahkan SQL ke Editor Migration
+        untuk ditinjau dan diedit sebelum dieksekusi.</p>
+    </form>
+    {{ else }}
+    <p class="text-secondary" style="font-size: 0.85rem; margin-top: 1rem;">Akun Anda memiliki izin <em>View Only</em>.
+      Hanya pengguna dengan izin <em>View + Edit</em> yang dapat membawa SQL ke editor dan mengeksekusi migration.</p>
+    {{ end }}
+  </section>
+  {{ end }}
+  {{ end }}
+</section>
+{{ end }}

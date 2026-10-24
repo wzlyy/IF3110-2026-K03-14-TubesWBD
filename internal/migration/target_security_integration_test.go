@@ -174,7 +174,7 @@ func TestMySQLRejectsElevatedDefinerObjects(t *testing.T) {
 				if _, err := admin.Exec("CREATE TRIGGER " + qdb + "." + f.table + "_trigger AFTER INSERT ON " + qdb + "." + f.table + " FOR EACH ROW INSERT INTO " + qother + ".victim VALUES(NEW.id)"); err != nil {
 					t.Fatal(err)
 				}
-				query = "INSERT INTO "+f.table+" VALUES(1)"
+				query = "INSERT INTO " + f.table + " VALUES(1)"
 			}
 			a := f.execute(t, query)
 			var count int

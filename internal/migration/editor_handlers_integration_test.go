@@ -33,7 +33,7 @@ func migrationHTTPFixture(t *testing.T, dbms, level string) *httpFixture {
 	t.Helper()
 	f := migrationFixture(t, dbms)
 	pages := pageRenderer{}
-	for _, page := range []string{"editor", "history", "detail"} {
+	for _, page := range []string{"editor", "history", "detail", "diff"} {
 		parsed, err := template.ParseFiles("../../web/templates/layout.html", "../../web/templates/migration/"+page+".html")
 		if err != nil {
 			t.Fatal(err)
@@ -158,6 +158,47 @@ func TestMigrationEditorPreviewExecuteHistory(t *testing.T) {
 			}
 			if w := f.request("POST", f.base+"/execute", url.Values{"sql_query": {strings.Repeat("x", 30*1024)}}, true); w.Code != 413 {
 				t.Fatalf("oversize: %d", w.Code)
+			}
+		})
+	}
+}
+
+func TestGeneratedSQLToEditorFlow(t *testing.T) {
+	for _, dbms := range []string{"postgres", "mysql"} {
+		t.Run(dbms, func(t *testing.T) {
+			f := migrationHTTPFixture(t, dbms, "VIEW_EDIT")
+			diffURL := "/databases/" + f.connection.ID + "/diff"
+
+			// 1. GET diff page
+			w := f.request("GET", diffURL, nil, false)
+			if w.Code != 200 || !strings.Contains(w.Body.String(), "Bandingkan Skema") {
+				t.Fatalf("GET diff failed: %d %s", w.Code, w.Body.String())
+			}
+
+			// 2. POST diff with target schema JSON
+			targetJSON := `{"tables":[{"name":"` + f.table + `_diff","columns":[{"name":"id","type":"integer","nullable":false}],"primary_key":["id"]}]}`
+			w = f.request("POST", diffURL, url.Values{"target_schema_json": {targetJSON}}, true)
+			if w.Code != 200 || !strings.Contains(w.Body.String(), "Bawa SQL ke Editor Migration") {
+				t.Fatalf("POST diff failed: %d %s", w.Code, w.Body.String())
+			}
+
+			// 3. Bring SQL to Editor via preview
+			candSQL := "CREATE TABLE " + f.table + "_diff (id integer NOT NULL, PRIMARY KEY (id));"
+			w = f.request("POST", f.base+"/preview", url.Values{"sql_query": {candSQL}}, true)
+			if w.Code != 200 || !strings.Contains(w.Body.String(), "Pratinjau SQL") || !strings.Contains(w.Body.String(), f.table+"_diff") {
+				t.Fatalf("Preview generated SQL failed: %d %s", w.Code, w.Body.String())
+			}
+
+			// 4. View Only permission check: View Only can view diff, but cannot preview/edit
+			fReadOnly := migrationHTTPFixture(t, dbms, "VIEW_ONLY")
+			diffURLRO := "/databases/" + fReadOnly.connection.ID + "/diff"
+			wRO := fReadOnly.request("GET", diffURLRO, nil, false)
+			if wRO.Code != 200 {
+				t.Fatalf("View Only expected 200 on GET diff, got: %d", wRO.Code)
+			}
+			wROPreview := fReadOnly.request("POST", fReadOnly.base+"/preview", url.Values{"sql_query": {candSQL}}, true)
+			if wROPreview.Code != 403 {
+				t.Fatalf("View Only expected 403 on POST preview, got: %d", wROPreview.Code)
 			}
 		})
 	}

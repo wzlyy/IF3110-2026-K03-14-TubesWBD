@@ -3,11 +3,14 @@ package auth
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 
 	"github.com/google/uuid"
 )
+
+var ErrBootstrapSecretRequired = errors.New("set ADMIN_INITIAL_PASSWORD to a private, non-default secret before creating the initial platform administrator")
 
 // BootstrapPlatformAdmin ensures an initial platform admin account exists in the platform database.
 // This function is strictly idempotent: if an active platform admin already exists, it does nothing.
@@ -15,10 +18,6 @@ func BootstrapPlatformAdmin(ctx context.Context, db *sql.DB, username, password 
 	if username == "" {
 		username = "admin"
 	}
-	if password == "" {
-		password = "Admin@Secure123!"
-	}
-
 	var count int
 	err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM users WHERE is_platform_admin = TRUE").Scan(&count)
 	if err != nil {
@@ -28,6 +27,9 @@ func BootstrapPlatformAdmin(ctx context.Context, db *sql.DB, username, password 
 	if count > 0 {
 		log.Println("[BOOTSTRAP] Platform admin account already present. Skipping initial bootstrap.")
 		return nil
+	}
+	if password == "" || password == "Admin@Secure123!" {
+		return ErrBootstrapSecretRequired
 	}
 
 	hash, err := HashPassword(password)

@@ -41,14 +41,14 @@ services:
     container_name: tubeswbd-target-mysql
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${TARGET_MYSQL_PASSWORD:-rootpassword}
+      MYSQL_ROOT_PASSWORD: ${TARGET_MYSQL_ROOT_PASSWORD:-rootpassword}
       MYSQL_DATABASE: ${TARGET_MYSQL_NAME:-target_db}
     ports:
       - "${TARGET_MYSQL_PORT:-3306}:3306"
     volumes:
       - target_mysql_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${TARGET_MYSQL_PASSWORD:-rootpassword}"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${TARGET_MYSQL_ROOT_PASSWORD:-rootpassword}"]
       interval: 5s
       timeout: 5s
       retries: 5

@@ -2,7 +2,7 @@ package admin
 
 import (
 	"database/sql"
-	"fmt"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -126,23 +126,26 @@ func (h *UserAdminHandler) ToggleActive(w http.ResponseWriter, r *http.Request) 
 	}
 
 	ctx := r.Context()
-	var currentActive bool
-	err := h.DB.QueryRowContext(ctx, "SELECT is_active FROM users WHERE id = $1", userID).Scan(&currentActive)
-	if err != nil {
+	err := withTransaction(ctx, h.DB, func(tx *sql.Tx) error {
+		var currentActive bool
+		if err := tx.QueryRowContext(ctx, "SELECT is_active FROM users WHERE id = $1 FOR UPDATE", userID).Scan(&currentActive); err != nil {
+			return err
+		}
+		if err := requireAffected(tx.ExecContext(ctx, "UPDATE users SET is_active = $1 WHERE id = $2", !currentActive, userID)); err != nil {
+			return err
+		}
+		if currentActive {
+			return auth.RevokeAllUserSessions(ctx, tx, userID)
+		}
+		return nil
+	})
+	if errors.Is(err, sql.ErrNoRows) {
 		http.Redirect(w, r, "/admin/users?error=Pengguna+tidak+ditemukan", http.StatusSeeOther)
 		return
 	}
-
-	newActive := !currentActive
-	_, err = h.DB.ExecContext(ctx, "UPDATE users SET is_active = $1 WHERE id = $2", newActive, userID)
 	if err != nil {
 		http.Redirect(w, r, "/admin/users?error=Gagal+mengubah+status+pengguna", http.StatusSeeOther)
 		return
-	}
-
-	// If deactivated, revoke all active sessions to force re-login
-	if !newActive {
-		_ = auth.RevokeAllUserSessions(ctx, h.DB, userID)
 	}
 
 	http.Redirect(w, r, "/admin/users?success=Status+pengguna+berhasil+diperbarui", http.StatusSeeOther)
@@ -159,26 +162,27 @@ func (h *UserAdminHandler) ToggleAdmin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	var currentAdmin bool
-	err := h.DB.QueryRowContext(ctx, "SELECT is_platform_admin FROM users WHERE id = $1", userID).Scan(&currentAdmin)
-	if err != nil {
+	err := withTransaction(ctx, h.DB, func(tx *sql.Tx) error {
+		var currentAdmin bool
+		if err := tx.QueryRowContext(ctx, "SELECT is_platform_admin FROM users WHERE id = $1 FOR UPDATE", userID).Scan(&currentAdmin); err != nil {
+			return err
+		}
+		if err := requireAffected(tx.ExecContext(ctx, "UPDATE users SET is_platform_admin = $1 WHERE id = $2", !currentAdmin, userID)); err != nil {
+			return err
+		}
+		if currentAdmin {
+			return auth.RevokeAllUserSessions(ctx, tx, userID)
+		}
+		return auth.RotateUserSessions(ctx, tx, userID)
+	})
+	if errors.Is(err, sql.ErrNoRows) {
 		http.Redirect(w, r, "/admin/users?error=Pengguna+tidak+ditemukan", http.StatusSeeOther)
 		return
 	}
 
-	newAdmin := !currentAdmin
-	_, err = h.DB.ExecContext(ctx, "UPDATE users SET is_platform_admin = $1 WHERE id = $2", newAdmin, userID)
 	if err != nil {
 		http.Redirect(w, r, "/admin/users?error=Gagal+mengubah+peran+admin", http.StatusSeeOther)
 		return
-	}
-
-	if newAdmin {
-		// Privilege escalation: rotate session without forcing logout
-		_ = auth.RotateUserSessions(ctx, h.DB, userID)
-	} else {
-		// Privilege revocation: revoke all sessions
-		_ = auth.RevokeAllUserSessions(ctx, h.DB, userID)
 	}
 
 	http.Redirect(w, r, "/admin/users?success=Peran+admin+berhasil+diperbarui", http.StatusSeeOther)
@@ -201,14 +205,16 @@ func (h *UserAdminHandler) ResetPassword(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	_, err = h.DB.ExecContext(ctx, "UPDATE users SET password_hash = $1 WHERE id = $2", hash, userID)
+	err = withTransaction(ctx, h.DB, func(tx *sql.Tx) error {
+		if err := requireAffected(tx.ExecContext(ctx, "UPDATE users SET password_hash = $1 WHERE id = $2", hash, userID)); err != nil {
+			return err
+		}
+		return auth.RevokeAllUserSessions(ctx, tx, userID)
+	})
 	if err != nil {
 		http.Redirect(w, r, "/admin/users?error=Gagal+mengubah+password", http.StatusSeeOther)
 		return
 	}
 
-	// Revoke sessions upon password change for security
-	_ = auth.RevokeAllUserSessions(ctx, h.DB, userID)
-
-	http.Redirect(w, r, fmt.Sprintf("/admin/users?success=Password+berhasil+diperbarui"), http.StatusSeeOther)
+	http.Redirect(w, r, "/admin/users?success=Password+berhasil+diperbarui", http.StatusSeeOther)
 }

@@ -22,6 +22,9 @@ import (
 
 func connectionFixture(t *testing.T) (*ConnectionStore, *TargetManager) {
 	t.Helper()
+	if os.Getenv("WBD_TEST_DATABASES") != "1" {
+		t.Skip("use scripts/test-integration.ps1 with dedicated test databases")
+	}
 	if os.Getenv("PLATFORM_DB_HOST") == "" || os.Getenv("TARGET_PG_HOST") == "" {
 		t.Skip("dedicated PostgreSQL test environment not configured")
 	}

@@ -151,8 +151,33 @@ func (s *ConnectionStore) Update(ctx context.Context, id string, c Connection, p
 // Delete cascades to connection grants and migration history.
 // Call TargetManager.Invalidate after successful deletion.
 func (s *ConnectionStore) Delete(ctx context.Context, id string) error {
-	result, err := s.db.ExecContext(ctx, "DELETE FROM database_connections WHERE id=$1", id)
-	return connectionWriteResult(result, err)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return errors.New("cannot save connection changes")
+	}
+	defer tx.Rollback()
+	var found string
+	if err := tx.QueryRowContext(ctx, "SELECT id FROM database_connections WHERE id=$1 FOR UPDATE", id).Scan(&found); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrConnectionNotFound
+		}
+		return errors.New("cannot save connection changes")
+	}
+	// Capture affected users before cascading grants. Session failure must leave
+	// the connection, its grants and its history intact.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id IN (
+	 SELECT ug.user_id FROM user_groups ug JOIN group_database_grants gdg ON gdg.group_id=ug.group_id
+	 WHERE gdg.database_id=$1)`, id); err != nil {
+		return errors.New("cannot save connection changes")
+	}
+	result, err := tx.ExecContext(ctx, "DELETE FROM database_connections WHERE id=$1", id)
+	if err := connectionWriteResult(result, err); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return errors.New("cannot save connection changes")
+	}
+	return nil
 }
 
 func connectionWriteResult(result sql.Result, err error) error {

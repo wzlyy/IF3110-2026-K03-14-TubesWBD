@@ -19,6 +19,7 @@ import (
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/auth"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/config"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/database"
+	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/migration"
 )
 
 // TemplateMap holds separately parsed templates to prevent block collision.
@@ -107,11 +108,13 @@ func loadTemplates(webDir string) (*TemplateMap, error) {
 		}
 		tm.templates["database-"+page+".html"] = t
 	}
-	migrationTmpl, err := template.ParseFiles(layoutPath, filepath.Join(webDir, "templates", "migration", "editor.html"))
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse migration editor: %w", err)
+	for _, page := range []string{"editor", "history", "detail"} {
+		t, err := template.ParseFiles(layoutPath, filepath.Join(webDir, "templates", "migration", page+".html"))
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse migration %s: %w", page, err)
+		}
+		tm.templates["migration-"+page+".html"] = t
 	}
-	tm.templates["migration-editor.html"] = migrationTmpl
 
 	return tm, nil
 }
@@ -188,6 +191,13 @@ func main() {
 	}
 	viewerHandler := &database.ViewerHandler{Store: connectionStore, Manager: targetManager, Templates: templates}
 	explainHandler := &database.ExplainHandler{Store: connectionStore, Manager: targetManager, Templates: templates}
+	// Long-lived row locks have a separate pool, preserving audit/auth capacity.
+	migrationLocks, err := database.NewPlatformDB(cfg)
+	if err != nil {
+		log.Fatal("[FATAL] Migration lock database unavailable")
+	}
+	defer migrationLocks.Close()
+	migrationHandler := &migration.Handler{DB: db, Store: connectionStore, Runner: &migration.Runner{DB: db, Locks: migrationLocks, Manager: targetManager}, Templates: templates}
 
 	// 7. Middlewares
 	requireAuth := auth.RequireAuth(db, cfg.CookieSecure)
@@ -215,9 +225,7 @@ func main() {
 	})
 
 	// Authentication Endpoints
-	mux.HandleFunc("GET /login", authHandler.ShowLogin)
-	mux.HandleFunc("POST /login", authHandler.ProcessLogin)
-	mux.Handle("POST /logout", requireAuth(http.HandlerFunc(authHandler.ProcessLogout)))
+	authHandler.RegisterRoutes(mux, requireAuth)
 
 	// Platform Admin: Users
 	mux.Handle("GET /admin/users", protectAdmin(userAdminHandler.ListUsers))
@@ -252,7 +260,7 @@ func main() {
 	mux.Handle("GET /databases/{database_id}/schema", requireAuth(viewAccess(http.HandlerFunc(viewerHandler.ShowSchema))))
 	mux.Handle("GET /databases/{database_id}/data", requireAuth(viewAccess(http.HandlerFunc(viewerHandler.ShowData))))
 	mux.Handle("GET /databases/{database_id}/explain", requireAuth(viewAccess(http.HandlerFunc(explainHandler.Show))))
-	mux.Handle("GET /databases/{database_id}/migration", requireAuth(access.RequireDatabaseAccess(db, access.AccessViewEdit)(http.HandlerFunc(explainHandler.ShowMigrationDraft))))
+	migrationHandler.RegisterRoutes(mux, requireAuth)
 	mux.Handle("POST /databases/{database_id}/explain", requireAuth(database.LimitExplainBody(csrfProtection(viewAccess(http.HandlerFunc(explainHandler.Analyze))))))
 
 	// 9. Start HTTP Server with Graceful Shutdown

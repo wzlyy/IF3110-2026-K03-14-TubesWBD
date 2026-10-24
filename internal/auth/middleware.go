@@ -48,11 +48,18 @@ func RequireAuth(db *sql.DB, secureCookie bool) func(http.Handler) http.Handler 
 				SetSessionCookie(w, sess.ID, secureCookie)
 			} else {
 				// Check periodic rotation: every 15 minutes of activity
-				if time.Now().UTC().Sub(sess.LastActiveAt) > RotationInterval {
-					if rotated, err := RotateSession(ctx, db, sess.ID); err == nil {
-						sess = rotated
-						SetSessionCookie(w, sess.ID, secureCookie)
+				if time.Now().UTC().Sub(sess.LastRotatedAt) >= RotationInterval {
+					rotated, err := RotateSession(ctx, db, sess.ID)
+					if err != nil && errors.Is(err, sql.ErrNoRows) {
+						// Another request may have rotated this token first.
+						rotated, _, err = GetSession(ctx, db, sess.ID)
 					}
+					if err != nil {
+						http.Error(w, "Session rotation unavailable. Please retry.", http.StatusServiceUnavailable)
+						return
+					}
+					sess = rotated
+					SetSessionCookie(w, sess.ID, secureCookie)
 				}
 			}
 

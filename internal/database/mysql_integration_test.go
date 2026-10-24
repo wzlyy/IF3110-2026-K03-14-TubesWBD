@@ -63,6 +63,7 @@ func mysqlTargetFixture(t *testing.T) (*ConnectionStore, *TargetManager, *Connec
 
 func TestMySQLCatalogDataAndConnection(t *testing.T) {
 	store, manager, saved, target, prefix := mysqlTargetFixture(t)
+	provisioning := mysqlProvisioningFixture(t)
 	ctx := context.Background()
 	database := saved.DBName
 	qdb, _ := QuoteIdentifier("mysql", database)
@@ -82,18 +83,22 @@ func TestMySQLCatalogDataAndConnection(t *testing.T) {
 	}
 	otherDatabase := prefix + "_other"
 	qother, _ := QuoteIdentifier("mysql", otherDatabase)
-	exec("CREATE DATABASE " + qother)
+	if _, err := provisioning.Exec("CREATE DATABASE " + qother); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
 		for _, suffix := range []string{"_details", "_scalars", "_quoted`&/雪", "_rows_0", "_rows_50", "_rows_51", "_rows_101", "_parent"} {
 			if _, err := target.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+quoteTable(suffix)); err != nil {
 				t.Error(err)
 			}
 		}
-		if _, err := target.ExecContext(context.Background(), "DROP DATABASE "+qother); err != nil {
+		if _, err := provisioning.ExecContext(context.Background(), "DROP DATABASE "+qother); err != nil {
 			t.Error(err)
 		}
 	})
-	exec("CREATE TABLE " + qother + ".outside_table(id INT PRIMARY KEY)")
+	if _, err := provisioning.Exec("CREATE TABLE " + qother + ".outside_table(id INT PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
 	exec("CREATE TABLE " + quoteTable("_parent") + "(id INT PRIMARY KEY, second_id INT, UNIQUE KEY pair_unique(id,second_id))")
 	exec("CREATE TABLE " + quoteTable("_details") +
 		"(id INT PRIMARY KEY,label VARCHAR(100) DEFAULT 'hello',parent_id INT,CONSTRAINT " +
@@ -343,7 +348,8 @@ func TestMySQLViewerAuthorizationAndSSR(t *testing.T) {
 }
 
 func TestMySQLPunctuatedCredentials(t *testing.T) {
-	store, manager, saved, target, prefix := mysqlTargetFixture(t)
+	store, manager, saved, _, prefix := mysqlTargetFixture(t)
+	target := mysqlProvisioningFixture(t)
 	username, password := prefix+"_user", "p@ss /?&:#"
 	account := "'" + username + "'@'%'"
 	if _, err := target.Exec("CREATE USER " + account + " IDENTIFIED BY 'p@ss /?&:#'"); err != nil {
@@ -354,8 +360,8 @@ func TestMySQLPunctuatedCredentials(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	qdb, _ := QuoteIdentifier("mysql", saved.DBName)
-	if _, err := target.Exec("GRANT SELECT ON " + qdb + ".* TO " + account); err != nil {
+	qdb, _ := mysqlGrantScope(saved.DBName)
+	if _, err := target.Exec("GRANT SELECT, SHOW VIEW, TRIGGER ON " + qdb + ".* TO " + account); err != nil {
 		t.Fatal(err)
 	}
 	withPunctuation := *saved

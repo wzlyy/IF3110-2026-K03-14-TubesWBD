@@ -83,22 +83,76 @@ docker compose stop
 
 Platform Admin juga memerlukan grant untuk membaca atau mengubah target. Jangan mendaftarkan database metadata platform sebagai target migrasi.
 
-## Struktur proyek
+## Struktur repositori
+
+Tree berikut menampilkan direktori dan berkas utama repositori:
 
 ```text
-cmd/server/           Entrypoint dan konfigurasi server HTTP
-internal/access/      Kebijakan dan pemeriksaan hak akses
-internal/admin/       Pengelolaan pengguna, group, dan grant
-internal/auth/        Login, password, sesi, dan CSRF
-internal/config/      Pembacaan konfigurasi environment
-internal/database/    Koneksi, katalog, viewer, dan query plan
-internal/migration/   Editor, diff, generator, eksekusi, dan history
-migrations/platform/  Skema metadata PostgreSQL
-scripts/              Pengujian integrasi dan fixture MySQL
-web/                  Template HTML dan aset statis
+.
+├── .github/
+│   └── workflows/quality.yml     # Pemeriksaan kualitas dan integrasi di CI
+├── cmd/
+│   └── server/
+│       └── main.go               # Entrypoint, perakitan dependensi, dan routing HTTP
+├── internal/
+│   ├── access/                   # Kebijakan grant dan middleware akses database
+│   ├── admin/                    # Pengelolaan pengguna, group, dan grant
+│   ├── auth/                     # Bootstrap admin, login, password, sesi, dan CSRF
+│   ├── config/                   # Pembacaan dan validasi konfigurasi environment
+│   ├── database/                 # Metadata, koneksi target, katalog, viewer, dan EXPLAIN
+│   └── migration/                # Validasi SQL/skema, diff, generator, runner, dan history
+├── migrations/
+│   └── platform/                 # Skrip SQL skema metadata PostgreSQL
+├── scripts/
+│   ├── mysql-test-init.sql       # Provisioning akun dan database MySQL pengujian
+│   └── test-integration.ps1      # Pengaturan environment dan eksekusi tes integrasi
+├── web/
+│   ├── templates/
+│   │   ├── admin/                # Halaman administrasi
+│   │   ├── auth/                 # Halaman login
+│   │   ├── database/             # Daftar target, skema, data, dan query plan
+│   │   ├── migration/            # Editor, diff, riwayat, dan detail migrasi
+│   │   ├── layout.html           # Layout bersama halaman aplikasi
+│   │   └── databases.html        # Template halaman database
+│   └── static/
+│       ├── css/                  # Stylesheet antarmuka
+│       ├── images/               # Aset gambar
+│       └── js/                   # JavaScript antarmuka
+├── .env.example                  # Contoh konfigurasi environment
+├── compose.yaml                  # Database metadata dan target untuk pengembangan
+├── compose.test.yaml             # Database terpisah untuk pengujian integrasi
+├── go.mod                        # Versi Go dan dependensi modul
+├── go.sum                        # Checksum dependensi Go
+└── README.md
 ```
 
-Tes Go berada di dekat modul yang diuji. Tes integrasi memakai build tag `integration` dan database khusus pengujian.
+Tes Go (`*_test.go`) berada di dekat modul yang diuji, termasuk di `cmd/server/`. Tes integrasi memakai build tag `integration` dan database khusus pengujian.
+
+## Arsitektur aplikasi
+
+Aplikasi menggunakan arsitektur **monolit modular**: satu proses Go melayani HTTP, merender halaman, dan mengakses database. Kode dipisahkan berdasarkan tanggung jawab fitur di dalam `internal/`.
+
+- **Antarmuka web (`web/`)**: server merender HTML melalui `html/template`, sedangkan CSS, gambar, dan JavaScript disajikan sebagai aset statis. Form dan navigasi browser mengirim request ke endpoint server tanpa proses build frontend.
+- **Entrypoint dan routing (`cmd/server/`)**: `main.go` memuat konfigurasi, membuka database metadata, menginisialisasi skema dan admin awal, memuat template, lalu merakit handler beserta dependensinya. Routing menggunakan `http.ServeMux` dari `net/http`.
+- **Autentikasi dan otorisasi (`internal/auth/`, `internal/access/`, `internal/admin/`)**: middleware memvalidasi sesi, memeriksa peran Platform Admin atau grant target sesuai endpoint, serta melindungi operasi perubahan data dengan CSRF. Modul admin mengelola pengguna, group, dan grant; kebijakan akses database menentukan hak efektif `VIEW_ONLY` atau `VIEW_EDIT`.
+- **Operasi database (`internal/database/`)**: `ConnectionStore` menyimpan konfigurasi koneksi dan mengenkripsi password target pada metadata. `TargetManager` membuka serta mengelola pool koneksi target. Implementasi katalog PostgreSQL dan MySQL menyediakan skema untuk viewer, diff, dan analisis query.
+- **Migrasi (`internal/migration/`)**: handler menerima SQL atau skema tujuan JSON. Modul diff dan generator menghasilkan kandidat SQL untuk ditinjau di editor. Runner memvalidasi dan mengeksekusi SQL pada target, mengunci eksekusi per target, serta mencatat percobaan dan hasilnya pada metadata.
+
+Alur request untuk fitur yang dilindungi:
+
+```text
+Browser → Router HTTP → Middleware sesi/izin/CSRF sesuai endpoint → Handler
+                                                                    │
+                                    ┌───────────────────────────────┴──────┐
+                                    ▼                                      ▼
+                          PostgreSQL metadata                    PostgreSQL / MySQL target
+                                    │                                      │
+                                    └───────────────────┬──────────────────┘
+                                                        ▼
+                                             Template HTML → Browser
+```
+
+**Database metadata platform** menyimpan pengguna, sesi, group, grant, konfigurasi koneksi terenkripsi, dan riwayat migrasi. **Database target** menyimpan skema dan data yang dijelajahi atau diubah pengguna, serta receipt untuk memverifikasi hasil migrasi. Keduanya diakses melalui `database/sql` dan koneksi terpisah; metadata platform selalu memakai PostgreSQL, sedangkan target dapat memakai PostgreSQL atau MySQL. `compose.yaml` menyediakan tiga layanan database lokal tersebut; server Go dijalankan melalui `go run ./cmd/server`.
 
 ## Akses dan sesi
 
@@ -198,3 +252,12 @@ docker compose -p wbd-test -f compose.test.yaml stop
 Jika kebijakan PowerShell lokal menolak script, gunakan `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-integration.ps1`; pengaturan hanya berlaku pada proses tersebut. Bila port uji telah dipakai project Compose lain, periksa pemiliknya sebelum menjalankan suite. Jangan menghentikan atau menghapus database yang belum diidentifikasi.
 
 Script menetapkan environment database uji dan menjalankan paket secara serial (`-p 1`) agar fixture tidak saling mengganggu. Periksa hasil dan pastikan tes database tidak berstatus SKIP. Workflow CI menjalankan vet, build, audit kerentanan, dan suite integrasi dengan konfigurasi pengujian yang sama.
+
+
+## Anggota kelompok
+
+| NIM | Nama | Pengerjaan |
+|---|---|---|
+| 13524054 | Wildan Abdurrahman Ghazali | Pengelolaan koneksi database, viewer skema dan data, analisis query plan, serta editor, eksekusi, dan riwayat migrasi. |
+| 13524132 | Dika Pramudya Nugraha | Fondasi aplikasi, autentikasi dan hak akses, administrasi pengguna/group, Schema Diff dan generator SQL migrasi, serta pengujian integrasi dan dokumentasi. |
+| - | - | - |

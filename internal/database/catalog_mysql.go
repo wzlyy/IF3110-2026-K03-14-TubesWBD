@@ -18,6 +18,9 @@ func loadMySQLCatalog(ctx context.Context, tx *sql.Tx, dbName string) (*Catalog,
 		return nil, ErrTargetUnavailable
 	}
 	c := &Catalog{DBMS: "mysql", Name: dbName}
+	if err := tx.QueryRowContext(ctx, "SELECT @@lower_case_table_names").Scan(&c.LowerCaseTableNames); err != nil {
+		return nil, err
+	}
 	var schemaName string
 	err := tx.QueryRowContext(ctx, "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME=?", dbName).Scan(&schemaName)
 	if err == sql.ErrNoRows {

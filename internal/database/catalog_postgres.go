@@ -9,6 +9,11 @@ import (
 const userSchemaPredicate = `n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'`
 
 func loadPostgresCatalog(ctx context.Context, tx *sql.Tx, dbName string) (*Catalog, error) {
+	// Force deparsed FK/index definitions to retain user schema qualifiers.
+	// This setting is local to the read-only catalog transaction.
+	if _, err := tx.ExecContext(ctx, "SET LOCAL search_path = pg_catalog"); err != nil {
+		return nil, err
+	}
 	c := &Catalog{DBMS: "postgres", Name: dbName}
 	schemas := map[string]int{}
 	tables := map[int64]*Table{}

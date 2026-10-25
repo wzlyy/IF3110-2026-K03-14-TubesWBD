@@ -12,6 +12,8 @@ import (
 type Catalog struct {
 	DBMS, Name string
 	Schemas    []Schema
+	// MySQL server setting: 0 is case-sensitive; 1 and 2 fold table/schema names.
+	LowerCaseTableNames int
 }
 type Schema struct {
 	Name   string

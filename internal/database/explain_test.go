@@ -14,6 +14,15 @@ func TestValidateExplainSQL(t *testing.T) {
 		wantErr         error
 	}{
 		{"select", "postgres", " SELECT * FROM things WHERE label='a;b' ", false, "SELECT", nil},
+		{"postgres-terminal", "postgres", "SELECT * FROM users WHERE username = 'admin';", false, "SELECT", nil},
+		{"mysql-terminal", "mysql", "SELECT * FROM users WHERE username = 'admin';", false, "SELECT", nil},
+		{"terminal-analyze", "postgres", "UPDATE users SET is_platform_admin = false WHERE username = 'admin';", true, "UPDATE", nil},
+		{"terminal-ddl", "postgres", "CREATE TABLE test_explain (id INT);", false, "", ErrExplainDDL},
+		{"mysql-terminal-ddl", "mysql", "CREATE TABLE test_explain (id INT);", false, "", ErrExplainDDL},
+		{"terminal-comments", "postgres", "SELECT 'a;b'; /* end */ -- done\n ", false, "SELECT", nil},
+		{"double-terminal", "postgres", "SELECT 1;;", false, "", ErrExplainStatement},
+		{"stacked-after-comment", "mysql", "SELECT 1; /* end */ SELECT 2", false, "", ErrExplainStatement},
+		{"quoted-after-terminal", "postgres", "SELECT 1; 'hidden'", false, "", ErrExplainStatement},
 		{"insert", "postgres", "INSERT INTO things(label) VALUES('x')", true, "INSERT", nil},
 		{"with", "postgres", "WITH x AS (SELECT 1) SELECT * FROM x", false, "WITH", nil},
 		{"mysql-with", "mysql", "WITH x AS (SELECT 1) SELECT * FROM x", false, "WITH", nil},

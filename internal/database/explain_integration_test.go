@@ -34,7 +34,7 @@ func TestExplainPlanSafeDefault(t *testing.T) {
 		"UPDATE " + q + ".explain_rows SET label='planned' WHERE id=1",
 		"DELETE FROM " + q + ".explain_rows WHERE id=1",
 	} {
-		plan, err := RunExplain(ctx, target, "postgres", query, false)
+		plan, err := RunExplain(ctx, target, "postgres", query+";", false)
 		if err != nil || plan.Root == nil || plan.Analyzed || plan.Root.ActualTime != nil {
 			t.Fatalf("safe default %q: %+v %v", query, plan, err)
 		}
@@ -62,7 +62,7 @@ func TestExplainAnalyzeRollbackProtection(t *testing.T) {
 		"UPDATE " + q + ".explain_changes SET label='changed' WHERE id=1",
 		"DELETE FROM " + q + ".explain_changes WHERE id=1",
 	} {
-		plan, err := RunExplain(context.Background(), target, "postgres", query, true)
+		plan, err := RunExplain(context.Background(), target, "postgres", query+";", true)
 		if err != nil || plan.Root == nil || !plan.Analyzed || plan.Root.ActualTime == nil {
 			t.Fatalf("analyze %q: %+v %v", query, plan, err)
 		}
@@ -105,7 +105,7 @@ func TestMySQLExplainJSONAndTree(t *testing.T) {
 		"UPDATE " + table + " SET label='planned' WHERE id=1",
 		"DELETE FROM " + table + " WHERE id=1",
 	} {
-		plan, err := RunExplain(context.Background(), target, "mysql", query, false)
+		plan, err := RunExplain(context.Background(), target, "mysql", query+";", false)
 		if err != nil || plan.Root == nil || plan.Format != "JSON" {
 			t.Fatalf("MySQL default %q: %+v %v", query, plan, err)
 		}
@@ -126,7 +126,7 @@ func TestMySQLExplainJSONAndTree(t *testing.T) {
 	if nextID, err := inserted.LastInsertId(); err != nil || nextID != beforeNext {
 		t.Fatalf("MySQL default consumed an AUTO_INCREMENT value: got %d, want %d (%v)", nextID, beforeNext, err)
 	}
-	tree, err := RunExplain(context.Background(), target, "mysql", "SELECT * FROM "+table+" WHERE label='before'", true)
+	tree, err := RunExplain(context.Background(), target, "mysql", "SELECT * FROM "+table+" WHERE label='before';", true)
 	if err != nil || tree.Root == nil || tree.Format != "TREE" || tree.Root.ActualTime == nil {
 		t.Fatalf("MySQL TREE metrics: %+v %v", tree, err)
 	}

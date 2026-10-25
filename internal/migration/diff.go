@@ -1,9 +1,11 @@
 package migration
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 
@@ -40,10 +42,29 @@ type TableDef struct {
 
 // ColumnDef defines a desired column.
 type ColumnDef struct {
-	Name     string  `json:"name"`
-	DataType string  `json:"type"`
-	Nullable bool    `json:"nullable"`
-	Default  *string `json:"default"`
+	Name            string  `json:"name"`
+	DataType        string  `json:"type"`
+	Nullable        bool    `json:"nullable"`
+	Default         *string `json:"default"`
+	defaultProvided bool
+}
+
+// Missing default preserves an existing value; explicit JSON null removes it.
+func (c *ColumnDef) UnmarshalJSON(raw []byte) error {
+	type column ColumnDef
+	var value column
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&value); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return err
+	}
+	*c = ColumnDef(value)
+	_, c.defaultProvided = fields["default"]
+	return nil
 }
 
 // ConstraintDef defines a table constraint (PRIMARY KEY, FOREIGN KEY, UNIQUE, CHECK).
@@ -91,9 +112,10 @@ type SchemaChange struct {
 
 // DiffResult holds the overall outcome of a schema comparison
 type DiffResult struct {
-	DBMS        string
-	Changes     []SchemaChange
-	IsIdentical bool
+	DBMS          string
+	Changes       []SchemaChange
+	IsIdentical   bool
+	tableCaseMode int
 }
 
 // ParseTargetSchemaJSON parses and validates the JSON representation of the desired schema
@@ -103,8 +125,16 @@ func ParseTargetSchemaJSON(raw []byte, defaultSchema string) (*TargetSchemaDefin
 	}
 
 	var def TargetSchemaDefinition
-	if err := json.Unmarshal(raw, &def); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&def); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidTargetSchema, err)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return nil, fmt.Errorf("%w: hanya satu dokumen JSON diperbolehkan", ErrInvalidTargetSchema)
+	}
+	if len(def.Schemas) > 0 && len(def.Tables) > 0 {
+		return nil, fmt.Errorf("%w: gunakan schemas atau tables, bukan keduanya", ErrInvalidTargetSchema)
 	}
 
 	if defaultSchema == "" {
@@ -160,6 +190,9 @@ func ParseTargetSchemaJSON(raw []byte, defaultSchema string) (*TargetSchemaDefin
 		}
 	}
 
+	if err := validateTargetSchema(&def, def.DBMS); err != nil {
+		return nil, err
+	}
 	return &def, nil
 }
 
@@ -171,10 +204,20 @@ func CompareCatalogs(current *database.Catalog, desired *TargetSchemaDefinition)
 	if desired == nil {
 		return nil, errors.New("skema tujuan tidak boleh bernilai nil")
 	}
+	if current.DBMS != "postgres" && current.DBMS != "mysql" {
+		return nil, database.ErrUnsupportedDBMS
+	}
+	if desired.DBMS != "" && desired.DBMS != current.DBMS {
+		return nil, fmt.Errorf("%w: DBMS tujuan tidak sesuai target", ErrInvalidTargetSchema)
+	}
+	if err := validateTargetSchema(desired, current.DBMS, current); err != nil {
+		return nil, err
+	}
 
 	result := &DiffResult{
-		DBMS:    current.DBMS,
-		Changes: make([]SchemaChange, 0),
+		DBMS:          current.DBMS,
+		tableCaseMode: current.LowerCaseTableNames,
+		Changes:       make([]SchemaChange, 0),
 	}
 
 	// Build map of desired tables: "schema.table" -> TableDef
@@ -194,7 +237,10 @@ func CompareCatalogs(current *database.Catalog, desired *TargetSchemaDefinition)
 				tblSchema = scName
 			}
 			tbl.Schema = tblSchema
-			key := strings.ToLower(tblSchema) + "." + strings.ToLower(tbl.Name)
+			key := tableKey(current, tblSchema, tbl.Name)
+			if _, exists := desiredTables[key]; exists {
+				return nil, fmt.Errorf("%w: nama tabel berkonflik menurut konfigurasi target", ErrInvalidTargetSchema)
+			}
 			desiredTables[key] = tbl
 		}
 	}
@@ -203,7 +249,10 @@ func CompareCatalogs(current *database.Catalog, desired *TargetSchemaDefinition)
 	currentTables := make(map[string]database.Table)
 	for _, sc := range current.Schemas {
 		for _, tbl := range sc.Tables {
-			key := strings.ToLower(tbl.Schema) + "." + strings.ToLower(tbl.Name)
+			if strings.EqualFold(tbl.Name, "_dbplatform_migration_receipts") {
+				continue
+			}
+			key := tableKey(current, tbl.Schema, tbl.Name)
 			currentTables[key] = tbl
 		}
 	}
@@ -244,6 +293,12 @@ func CompareCatalogs(current *database.Catalog, desired *TargetSchemaDefinition)
 	for _, key := range currentKeys {
 		curTable := currentTables[key]
 		if _, exists := desiredTables[key]; !exists {
+			// Break foreign-key dependencies, including cycles, before table drops.
+			for _, con := range curTable.Constraints {
+				if strings.EqualFold(con.Type, "FOREIGN KEY") {
+					result.Changes = append(result.Changes, SchemaChange{Action: ActionDropConstraint, Schema: curTable.Schema, Table: curTable.Name, Object: con.Name, OldValue: con.Type, Destructive: true, Description: "Hapus foreign key " + con.Name, Details: con})
+				}
+			}
 			result.Changes = append(result.Changes, SchemaChange{
 				Action:      ActionDropTable,
 				Schema:      curTable.Schema,
@@ -257,6 +312,9 @@ func CompareCatalogs(current *database.Catalog, desired *TargetSchemaDefinition)
 		}
 	}
 
+	// A surviving FK may still depend on a key being replaced. Temporarily
+	// release FKs before structural changes, restoring the desired definitions.
+	reattachForeignKeys(current, desiredTables, result)
 	result.IsIdentical = len(result.Changes) == 0
 	return result, nil
 }
@@ -264,17 +322,17 @@ func CompareCatalogs(current *database.Catalog, desired *TargetSchemaDefinition)
 func compareTableDetails(cur *database.Table, des *TableDef, result *DiffResult) {
 	curColMap := make(map[string]database.Column)
 	for _, c := range cur.Columns {
-		curColMap[strings.ToLower(c.Name)] = c
+		curColMap[objectKey(result.DBMS, c.Name)] = c
 	}
 
 	desColMap := make(map[string]ColumnDef)
 	for _, c := range des.Columns {
-		desColMap[strings.ToLower(c.Name)] = c
+		desColMap[objectKey(result.DBMS, c.Name)] = c
 	}
 
 	// A. Check for Columns to ADD
 	for _, col := range des.Columns {
-		k := strings.ToLower(col.Name)
+		k := objectKey(result.DBMS, col.Name)
 		if _, exists := curColMap[k]; !exists {
 			nullDesc := "NULL"
 			if !col.Nullable {
@@ -292,6 +350,9 @@ func compareTableDetails(cur *database.Table, des *TableDef, result *DiffResult)
 			})
 		} else {
 			curCol := curColMap[k]
+			if col.Default == nil && !col.defaultProvided {
+				col.Default = curCol.Default
+			}
 			if isColumnModified(curCol, col) {
 				oldDesc := formatColumnSnapshot(curCol)
 				newDesc := formatColumnDef(col)
@@ -312,7 +373,7 @@ func compareTableDetails(cur *database.Table, des *TableDef, result *DiffResult)
 
 	// B. Check for Columns to DROP
 	for _, curCol := range cur.Columns {
-		k := strings.ToLower(curCol.Name)
+		k := objectKey(result.DBMS, curCol.Name)
 		if _, exists := desColMap[k]; !exists {
 			result.Changes = append(result.Changes, SchemaChange{
 				Action:      ActionDropColumn,
@@ -330,31 +391,18 @@ func compareTableDetails(cur *database.Table, des *TableDef, result *DiffResult)
 	// C. Check Constraints
 	curConMap := make(map[string]database.Constraint)
 	for _, con := range cur.Constraints {
-		curConMap[strings.ToLower(con.Name)] = con
+		curConMap[objectKey(result.DBMS, con.Name)] = con
 	}
 
 	desConMap := make(map[string]ConstraintDef)
-	for _, con := range des.Constraints {
-		desConMap[strings.ToLower(con.Name)] = con
+	constraints := desiredConstraints(*des, result.DBMS, cur.Constraints)
+	for _, con := range constraints {
+		desConMap[objectKey(result.DBMS, con.Name)] = con
 	}
 
-	// Primary key shorthand in TableDef
-	if len(des.PrimaryKey) > 0 {
-		pkName := strings.ToLower(des.Name + "_pkey")
-		if _, exists := desConMap[pkName]; !exists {
-			pkCon := ConstraintDef{
-				Name:    des.Name + "_pkey",
-				Type:    "PRIMARY KEY",
-				Columns: des.PrimaryKey,
-			}
-			desConMap[pkName] = pkCon
-			des.Constraints = append(des.Constraints, pkCon)
-		}
-	}
-
-	for _, con := range des.Constraints {
-		k := strings.ToLower(con.Name)
-		if _, exists := curConMap[k]; !exists {
+	for _, con := range constraints {
+		k := objectKey(result.DBMS, con.Name)
+		if old, exists := curConMap[k]; !exists || !equalConstraint(result.DBMS, old, con, des.Schema, result.tableCaseMode) {
 			result.Changes = append(result.Changes, SchemaChange{
 				Action:      ActionAddConstraint,
 				Schema:      des.Schema,
@@ -369,8 +417,13 @@ func compareTableDetails(cur *database.Table, des *TableDef, result *DiffResult)
 	}
 
 	for _, curCon := range cur.Constraints {
-		k := strings.ToLower(curCon.Name)
-		if _, exists := desConMap[k]; !exists {
+		k := objectKey(result.DBMS, curCon.Name)
+		// MySQL exposes CREATE UNIQUE INDEX as both an index and a constraint.
+		// An explicitly desired index owns its replacement in the index pass.
+		if result.DBMS == "mysql" && curCon.Type == "UNIQUE" && hasIndex(des.Indexes, curCon.Name, result.DBMS) {
+			continue
+		}
+		if next, exists := desConMap[k]; !exists || !equalConstraint(result.DBMS, curCon, next, des.Schema, result.tableCaseMode) {
 			result.Changes = append(result.Changes, SchemaChange{
 				Action:      ActionDropConstraint,
 				Schema:      cur.Schema,
@@ -387,17 +440,17 @@ func compareTableDetails(cur *database.Table, des *TableDef, result *DiffResult)
 	// D. Check Indexes
 	curIdxMap := make(map[string]database.Index)
 	for _, idx := range cur.Indexes {
-		curIdxMap[strings.ToLower(idx.Name)] = idx
+		curIdxMap[objectKey(result.DBMS, idx.Name)] = idx
 	}
 
 	desIdxMap := make(map[string]IndexDef)
 	for _, idx := range des.Indexes {
-		desIdxMap[strings.ToLower(idx.Name)] = idx
+		desIdxMap[objectKey(result.DBMS, idx.Name)] = idx
 	}
 
 	for _, idx := range des.Indexes {
-		k := strings.ToLower(idx.Name)
-		if _, exists := curIdxMap[k]; !exists {
+		k := objectKey(result.DBMS, idx.Name)
+		if old, exists := curIdxMap[k]; !exists || !equalIndex(result.DBMS, old, idx) {
 			idxType := "INDEX"
 			if idx.Unique {
 				idxType = "UNIQUE INDEX"
@@ -417,11 +470,14 @@ func compareTableDetails(cur *database.Table, des *TableDef, result *DiffResult)
 
 	for _, curIdx := range cur.Indexes {
 		// Ignore automatic primary key indexes
-		if curIdx.Primary {
+		if curIdx.Primary || constraintOwnsIndex(cur.Constraints, curIdx.Name) && !(result.DBMS == "mysql" && hasIndex(des.Indexes, curIdx.Name, result.DBMS)) {
 			continue
 		}
-		k := strings.ToLower(curIdx.Name)
-		if _, exists := desIdxMap[k]; !exists {
+		k := objectKey(result.DBMS, curIdx.Name)
+		if _, explicit := desIdxMap[k]; !explicit && result.DBMS == "mysql" && supportsForeignKey(curIdx, constraints) {
+			continue
+		}
+		if next, exists := desIdxMap[k]; !exists || !equalIndex(result.DBMS, curIdx, next) {
 			result.Changes = append(result.Changes, SchemaChange{
 				Action:      ActionDropIndex,
 				Schema:      cur.Schema,
@@ -460,6 +516,7 @@ func isColumnModified(cur database.Column, des ColumnDef) bool {
 func equalDataTypes(a, b string) bool {
 	norm := func(s string) string {
 		s = strings.ToLower(strings.TrimSpace(s))
+		s = strings.ReplaceAll(s, "character varying", "varchar")
 		s = strings.ReplaceAll(s, " ", "")
 		switch s {
 		case "int", "int4", "integer":
@@ -470,7 +527,7 @@ func equalDataTypes(a, b string) bool {
 			return "smallint"
 		case "bool", "boolean":
 			return "boolean"
-		case "varchar", "character varying":
+		case "varchar":
 			return "varchar"
 		}
 		return s

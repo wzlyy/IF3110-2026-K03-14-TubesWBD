@@ -1,21 +1,79 @@
-{{ define "title" }}Detail Migration - DB Platform{{ end }}
+{{ define "title" }}Detail Migration — Database Platform{{ end }}
 {{ define "content" }}
 <section class="database-page">
- <a href="{{ .HistoryURL }}" class="database-back">Kembali ke riwayat migration</a>
- {{ if .Attempt }}
- <div class="page-header"><div><h1>Migration versi {{ .Attempt.Version }} · {{ .Connection.Name }}</h1><p class="text-secondary">Percobaan {{ .Attempt.ID }}</p></div><span class="badge migration-status-{{ .Attempt.Status }}">{{ .Attempt.Status }}</span></div>
- <section class="card">
-  {{ if eq .Connection.DBMS "mysql" }}<div class="alert alert-danger" role="note">{{ .MySQLWarning }}</div>{{ end }}
-  <dl class="migration-metadata"><div><dt>Pelaksana</dt><dd>{{ .Attempt.Executor }}</dd></div><div><dt>Mulai</dt><dd>{{ .Attempt.StartedUTC }}</dd></div><div><dt>Selesai</dt><dd>{{ .Attempt.FinishedUTC }}</dd></div></dl>
-  {{ if .Attempt.PartialChanges }}<div class="alert alert-danger" role="note">Perubahan parsial mungkin terjadi pada target MySQL. DDL atau tabel nontransaksional yang sudah berubah tidak dapat dibatalkan otomatis. Periksa kondisi target sebelum retry.</div>{{ end }}
-  {{ if .Attempt.ErrorMessage }}<div class="alert alert-danger" role="alert">{{ .Attempt.ErrorMessage }}</div>{{ end }}
-  {{ if eq .Attempt.Status "PENDING" }}<div class="alert migration-pending" role="status">{{ .PendingMessage }}</div>{{ end }}
-  <h2>SQL lengkap</h2><pre class="migration-sql"><code>{{ .Attempt.SQL }}</code></pre>
-  {{ if .CanEdit }}
-  {{ if eq .Attempt.Status "PENDING" }}<form action="{{ .BaseURL }}/{{ .Attempt.ID }}/reconcile" method="POST"><input type="hidden" name="csrf_token" value="{{ .CSRFToken }}"><button class="btn btn-primary" type="submit">Rekonsiliasi</button><p class="connection-help">Memeriksa bukti commit untuk seluruh percobaan. SQL tidak dieksekusi ulang.</p></form>{{ end }}
-  {{ if eq .Attempt.Status "FAILED" }}<form action="{{ .BaseURL }}/{{ .Attempt.ID }}/retry" method="POST"><input type="hidden" name="csrf_token" value="{{ .CSRFToken }}"><p class="connection-help">Retry menjalankan SQL yang sama sebagai percobaan baru jika versi kandidat ini masih tersedia. Untuk memperbaiki SQL, buka editor.</p><div class="connection-actions"><button class="btn btn-secondary" type="submit">Retry SQL yang sama</button><a class="btn btn-primary" href="{{ .BaseURL }}">Buka editor</a></div></form>{{ end }}
+  <a href="{{ .HistoryURL }}" class="database-back">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+    Kembali ke riwayat migration
+  </a>
+  {{ if .Attempt }}
+  <div class="page-header">
+    <div>
+      <h1 class="page-title">Migration versi {{ .Attempt.Version }} · {{ .Connection.Name }}</h1>
+      <p class="page-subtitle">Percobaan ID: <code>{{ .Attempt.ID }}</code></p>
+    </div>
+    <span class="badge migration-status-{{ .Attempt.Status }}">{{ .Attempt.Status }}</span>
+  </div>
+
+  <section class="card">
+    {{ if eq .Connection.DBMS "mysql" }}
+    <div class="alert alert-danger" role="note" style="margin-bottom: 1.25rem;">{{ .MySQLWarning }}</div>
+    {{ end }}
+
+    <dl class="migration-metadata-grid">
+      <div class="meta-item">
+        <dt>Pelaksana</dt>
+        <dd>{{ .Attempt.Executor }}</dd>
+      </div>
+      <div class="meta-item">
+        <dt>Mulai (UTC)</dt>
+        <dd>{{ .Attempt.StartedUTC }}</dd>
+      </div>
+      <div class="meta-item">
+        <dt>Selesai (UTC)</dt>
+        <dd>{{ .Attempt.FinishedUTC }}</dd>
+      </div>
+    </dl>
+
+    {{ if .Attempt.PartialChanges }}
+    <div class="alert alert-danger" role="note" style="margin-bottom: 1.25rem;">Perubahan parsial mungkin terjadi pada target MySQL. DDL atau tabel nontransaksional yang sudah berubah tidak dapat dibatalkan otomatis. Periksa kondisi target sebelum retry.</div>
+    {{ end }}
+
+    {{ if .Attempt.ErrorMessage }}
+    <div class="alert alert-danger" role="alert" style="margin-bottom: 1.25rem;">{{ .Attempt.ErrorMessage }}</div>
+    {{ end }}
+
+    {{ if eq .Attempt.Status "PENDING" }}
+    <div class="alert migration-pending" role="status" style="margin-bottom: 1.25rem;">{{ .PendingMessage }}</div>
+    {{ end }}
+
+    <div class="card-header" style="margin-top: 1.5rem; margin-bottom: 0.75rem;">
+      <h2 class="card-title">SQL lengkap</h2>
+    </div>
+    <pre class="migration-sql"><code>{{ .Attempt.SQL }}</code></pre>
+
+    {{ if .CanEdit }}
+    {{ if eq .Attempt.Status "PENDING" }}
+    <form action="{{ .BaseURL }}/{{ .Attempt.ID }}/reconcile" method="POST" style="margin-top: 1.5rem;">
+      <input type="hidden" name="csrf_token" value="{{ .CSRFToken }}">
+      <div class="connection-actions">
+        <button class="btn btn-primary" type="submit">Rekonsiliasi</button>
+      </div>
+      <p class="connection-help" style="margin-top: 0.5rem;">Memeriksa bukti commit untuk seluruh percobaan. SQL tidak dieksekusi ulang.</p>
+    </form>
+    {{ end }}
+
+    {{ if eq .Attempt.Status "FAILED" }}
+    <form action="{{ .BaseURL }}/{{ .Attempt.ID }}/retry" method="POST" style="margin-top: 1.5rem;">
+      <input type="hidden" name="csrf_token" value="{{ .CSRFToken }}">
+      <p class="connection-help" style="margin-bottom: 0.75rem;">Retry menjalankan SQL yang sama sebagai percobaan baru jika versi kandidat ini masih tersedia. Untuk memperbaiki SQL, buka editor.</p>
+      <div class="connection-actions">
+        <button class="btn btn-secondary" type="submit">Retry SQL yang sama</button>
+        <a class="btn btn-primary" href="{{ .BaseURL }}">Buka editor</a>
+      </div>
+    </form>
+    {{ end }}
+    {{ end }}
+  </section>
   {{ end }}
- </section>
- {{ end }}
 </section>
 {{ end }}

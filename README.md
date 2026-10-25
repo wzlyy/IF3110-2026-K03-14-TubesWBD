@@ -1,6 +1,6 @@
-# Database Management Platform - Milestone 1
-### IF3110 Pengembangan Aplikasi Web - Semester Ganjil 2026/2027
-**Kelompok K03 - 14**
+# Database Management Platform — Milestone 1
+### IF3110 Pengembangan Aplikasi Web — Semester Ganjil 2026/2027
+**Kelompok K03 — 14**
 
 ---
 

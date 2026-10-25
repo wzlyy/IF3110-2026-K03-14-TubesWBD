@@ -1,52 +1,70 @@
-{{ define "title" }}Riwayat Migration - DB Platform{{ end }}
+{{ define "title" }}Riwayat Migration — Database Platform{{ end }}
 {{ define "content" }}
 <section class="database-page">
-    <a href="/databases" class="database-back">Kembali ke daftar database</a>
+    <a href="/databases" class="database-back">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+        Kembali ke daftar database
+    </a>
     <div class="page-header">
         <div>
-            <h1>Riwayat migration{{ if .Connection }}: {{ .Connection.Name }}{{ end }}</h1>
-            <p class="text-secondary">Semua percobaan tersimpan. Versi resmi hanya bertambah setelah SUCCESS. Waktu
-                ditampilkan dalam UTC.</p>
+            <h1 class="page-title">Riwayat migration{{ if .Connection }}: {{ .Connection.Name }}{{ end }}</h1>
+            <p class="page-subtitle">Semua percobaan tersimpan. Versi resmi hanya bertambah setelah SUCCESS. Waktu ditampilkan dalam UTC.</p>
         </div>
-        <div class="connection-actions">{{ if .DiffURL }}<a class="btn btn-secondary" href="{{ .DiffURL }}">Schema
-                diff</a>{{ end }}{{ if .CanEdit }}<a class="btn btn-primary" href="{{ .BaseURL }}">Editor
-                migration</a>{{ end }}</div>
+        <div class="connection-actions">
+            {{ if .DiffURL }}<a class="btn btn-secondary" href="{{ .DiffURL }}">Schema diff</a>{{ end }}
+            {{ if .CanEdit }}<a class="btn btn-primary" href="{{ .BaseURL }}">Editor migration</a>{{ end }}
+        </div>
     </div>
     {{ if .History }}
-    <div class="card database-scroll">
-        <table class="data-table migration-history">
-            <thead>
-                <tr>
-                    <th>Versi</th>
-                    <th>Mulai (UTC)</th>
-                    <th>Pelaksana</th>
-                    <th>SQL</th>
-                    <th>Status</th>
-                    <th>Aksi</th>
-                </tr>
-            </thead>
-            <tbody>
-                {{ range .History }}<tr>
-                    <td>{{ .Version }}</td>
-                    <td>{{ .StartedUTC }}</td>
-                    <td>{{ .Executor }}</td>
-                    <td><code>{{ .Snippet }}</code></td>
-                    <td><span class="badge migration-status-{{ .Status }}">{{ .Status }}</span></td>
-                    <td>
-                        <div class="connection-actions"><a class="btn btn-secondary btn-sm"
-                                href="{{ $.BaseURL }}/{{ .ID }}">Detail</a>{{ if and $.CanEdit (eq .Status "PENDING") }}
-                            <form action="{{ $.BaseURL }}/{{ .ID }}/reconcile" method="POST"><input type="hidden"
-                                    name="csrf_token" value="{{ $.CSRFToken }}"><button class="btn btn-secondary btn-sm"
-                                    type="submit">Rekonsiliasi</button></form>{{ end }}
-                        </div>
-                    </td>
-                </tr>{{ end }}
-            </tbody>
-        </table>
+    <div class="card">
+        <div class="table-responsive">
+            <table class="data-table migration-history">
+                <thead>
+                    <tr>
+                        <th class="col-hist-version" scope="col">Versi</th>
+                        <th class="col-hist-time" scope="col">Mulai (UTC)</th>
+                        <th class="col-hist-user" scope="col">Pelaksana</th>
+                        <th class="col-hist-sql" scope="col">SQL</th>
+                        <th class="col-hist-status" scope="col">Status</th>
+                        <th class="col-hist-actions" scope="col" style="text-align: right;">Aksi</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{ range .History }}
+                    <tr>
+                        <td class="col-hist-version"><strong>{{ .Version }}</strong></td>
+                        <td class="col-hist-time text-secondary" style="font-size: 0.85rem; white-space: nowrap;">{{ .StartedUTC }}</td>
+                        <td class="col-hist-user" style="font-weight: 500;">{{ .Executor }}</td>
+                        <td class="col-hist-sql"><code>{{ .Snippet }}</code></td>
+                        <td class="col-hist-status"><span class="badge migration-status-{{ .Status }}">{{ .Status }}</span></td>
+                        <td class="col-hist-actions" style="text-align: right;">
+                            <div class="connection-actions" style="justify-content: flex-end;">
+                                <a class="btn btn-secondary btn-sm" href="{{ $.BaseURL }}/{{ .ID }}">Detail</a>
+                                {{ if and $.CanEdit (eq .Status "PENDING") }}
+                                <form action="{{ $.BaseURL }}/{{ .ID }}/reconcile" method="POST" style="margin: 0;">
+                                    <input type="hidden" name="csrf_token" value="{{ $.CSRFToken }}">
+                                    <button class="btn btn-secondary btn-sm" type="submit">Rekonsiliasi</button>
+                                </form>
+                                {{ end }}
+                            </div>
+                        </td>
+                    </tr>
+                    {{ end }}
+                </tbody>
+            </table>
+        </div>
     </div>
-    {{ else if not .ErrorMessage }}<div class="card database-empty">
+    {{ else if not .ErrorMessage }}
+    <div class="card database-empty">
+        <div class="empty-state-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"></circle>
+                <polyline points="12 6 12 12 16 14"></polyline>
+            </svg>
+        </div>
         <h2>Belum ada riwayat migration</h2>
         <p>Percobaan migration akan muncul setelah pengguna berizin mengeksekusi SQL.</p>
-    </div>{{ end }}
+    </div>
+    {{ end }}
 </section>
 {{ end }}

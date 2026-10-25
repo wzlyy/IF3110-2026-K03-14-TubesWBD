@@ -1,16 +1,111 @@
-{{ define "title" }}Data Tabel - DB Platform{{ end }}
+{{ define "title" }}Data Tabel — Database Platform{{ end }}
 {{ define "content" }}
 <section class="database-page">
- <a href="/databases" class="database-back">Kembali ke daftar database</a>
- <div class="page-header"><div><h1>Data{{ if .Connection }}: {{ .Connection.Name }}{{ end }}</h1>{{ if .Connection }}<p class="text-secondary">{{ .Connection.DBName }} {{ if eq .Connection.DBMS "mysql" }}<span class="badge badge-dbms-mysql">MySQL</span>{{ else }}<span class="badge badge-dbms-postgres">PostgreSQL</span>{{ end }}</p>{{ end }}</div>{{ if .Connection }}<div class="connection-actions"><a class="btn btn-secondary" href="{{ .SchemaURL }}">Lihat skema</a><a class="btn btn-secondary" href="/databases/{{ .Connection.ID }}/explain">Analisis plan</a></div>{{ end }}</div>
- {{ if .TableLinks }}<nav class="database-table-picker" aria-label="Pilih tabel">{{ range .TableLinks }}<a class="btn btn-secondary btn-sm" href="{{ .URL }}" {{ if .Selected }}aria-current="page"{{ end }}>{{ .Schema }}.{{ .Name }}</a>{{ end }}</nav>{{ end }}
- {{ if .Data }}
- <div class="database-section-header"><h2>{{ .Selected.Schema }}.{{ .Selected.Name }}</h2><span class="text-secondary">Maksimal 50 baris per halaman</span></div>
- <p class="connection-help">{{ if .Data.OrderedByPrimaryKey }}Diurutkan berdasarkan primary key.{{ else }}Tabel tidak memiliki primary key. Urutan baris dapat berubah antarhalaman.{{ end }}</p>
- <div class="card database-scroll" role="region" aria-label="Data tabel {{ .Selected.Schema }}.{{ .Selected.Name }}" tabindex="0"><table class="data-table database-data-table"><caption class="database-caption">Halaman {{ .Data.Page }} · {{ len .Data.Rows }} baris</caption><thead><tr>{{ range .Data.Columns }}<th scope="col">{{ . }}</th>{{ else }}<th scope="col">Baris</th>{{ end }}</tr></thead><tbody>
- {{ range .Data.Rows }}<tr>{{ range . }}<td>{{ if .Null }}<span class="database-null">NULL</span>{{ else if eq .Text "" }}<span class="database-empty-value">(string kosong)</span>{{ else }}<div class="database-cell">{{ .Text }}</div>{{ end }}</td>{{ else }}<td>Tabel tanpa kolom</td>{{ end }}</tr>{{ end }}
- </tbody></table>{{ if not .Data.Rows }}<p class="database-empty">Tidak ada baris pada halaman ini.{{ if .PreviousURL }} Kembali ke halaman sebelumnya.{{ end }}</p>{{ end }}</div>
- <nav class="database-pagination" aria-label="Halaman data">{{ if .PreviousURL }}<a class="btn btn-secondary" rel="prev" href="{{ .PreviousURL }}">Sebelumnya</a>{{ else }}<span class="btn btn-secondary" aria-disabled="true">Sebelumnya</span>{{ end }}<span>Halaman {{ .Data.Page }}</span>{{ if .NextURL }}<a class="btn btn-secondary" rel="next" href="{{ .NextURL }}">Berikutnya</a>{{ else }}<span class="btn btn-secondary" aria-disabled="true">Berikutnya</span>{{ end }}</nav>
- {{ else if and .Catalog (not .ErrorMessage) }}<div class="card database-empty"><h2>Belum ada tabel</h2><p>Database ini belum memiliki tabel pengguna untuk ditampilkan.</p></div>{{ end }}
+    <a href="/databases" class="database-back">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+        Kembali ke daftar database
+    </a>
+    <div class="page-header">
+        <div>
+            <h1 class="page-title">Data{{ if .Connection }}: {{ .Connection.Name }}{{ end }}</h1>
+            {{ if .Connection }}
+            <p class="page-subtitle">
+                <span class="connection-detail-badge">{{ .Connection.DBName }}</span>
+                {{ if eq .Connection.DBMS "mysql" }}
+                <span class="badge badge-dbms-mysql">MySQL</span>
+                {{ else }}
+                <span class="badge badge-dbms-postgres">PostgreSQL</span>
+                {{ end }}
+            </p>
+            {{ end }}
+        </div>
+        {{ if .Connection }}
+        <div class="connection-actions">
+            <a class="btn btn-secondary" href="{{ .SchemaURL }}">Lihat skema</a>
+            <a class="btn btn-secondary" href="/databases/{{ .Connection.ID }}/explain">Analisis plan</a>
+        </div>
+        {{ end }}
+    </div>
+
+    {{ if .TableLinks }}
+    <nav class="database-table-picker" aria-label="Pilih tabel">
+        {{ range .TableLinks }}
+        <a class="btn btn-secondary btn-sm" href="{{ .URL }}" {{ if .Selected }}aria-current="page"{{ end }}>{{ .Schema }}.{{ .Name }}</a>
+        {{ end }}
+    </nav>
+    {{ end }}
+
+    {{ if .Data }}
+    <div class="database-section-header">
+        <h2 style="font-size: 1.25rem; font-weight: 600; color: var(--text-primary);">{{ .Selected.Schema }}.{{ .Selected.Name }}</h2>
+        <span class="badge badge-user">Maksimal 50 baris per halaman</span>
+    </div>
+    <p class="connection-help" style="margin-bottom: 1rem;">
+        {{ if .Data.OrderedByPrimaryKey }}Diurutkan berdasarkan primary key.{{ else }}Tabel tidak memiliki primary key. Urutan baris dapat berubah antarhalaman.{{ end }}
+    </p>
+
+    <div class="card database-scroll" role="region" aria-label="Data tabel {{ .Selected.Schema }}.{{ .Selected.Name }}" tabindex="0" style="padding: 0; overflow: auto;">
+        <table class="data-table database-data-table">
+            <caption class="database-caption">Halaman {{ .Data.Page }} · {{ len .Data.Rows }} baris</caption>
+            <thead>
+                <tr>
+                    {{ range .Data.Columns }}
+                    <th scope="col">{{ . }}</th>
+                    {{ else }}
+                    <th scope="col">Baris</th>
+                    {{ end }}
+                </tr>
+            </thead>
+            <tbody>
+                {{ range .Data.Rows }}
+                <tr>
+                    {{ range . }}
+                    <td>
+                        {{ if .Null }}
+                        <span class="database-null">NULL</span>
+                        {{ else if eq .Text "" }}
+                        <span class="database-empty-value">(string kosong)</span>
+                        {{ else }}
+                        <div class="database-cell">{{ .Text }}</div>
+                        {{ end }}
+                    </td>
+                    {{ else }}
+                    <td>Tabel tanpa kolom</td>
+                    {{ end }}
+                </tr>
+                {{ end }}
+            </tbody>
+        </table>
+        {{ if not .Data.Rows }}
+        <p class="database-empty">Tidak ada baris pada halaman ini.{{ if .PreviousURL }} Kembali ke halaman sebelumnya.{{ end }}</p>
+        {{ end }}
+    </div>
+
+    <nav class="database-pagination" aria-label="Halaman data">
+        {{ if .PreviousURL }}
+        <a class="btn btn-secondary" rel="prev" href="{{ .PreviousURL }}">Sebelumnya</a>
+        {{ else }}
+        <span class="btn btn-secondary" aria-disabled="true">Sebelumnya</span>
+        {{ end }}
+        <span class="pagination-indicator">Halaman {{ .Data.Page }}</span>
+        {{ if .NextURL }}
+        <a class="btn btn-secondary" rel="next" href="{{ .NextURL }}">Berikutnya</a>
+        {{ else }}
+        <span class="btn btn-secondary" aria-disabled="true">Berikutnya</span>
+        {{ end }}
+    </nav>
+    {{ else if and .Catalog (not .ErrorMessage) }}
+    <div class="card database-empty">
+        <div class="empty-state-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+                <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+                <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+            </svg>
+        </div>
+        <h2>Belum ada tabel</h2>
+        <p>Database ini belum memiliki tabel pengguna untuk ditampilkan.</p>
+    </div>
+    {{ end }}
 </section>
 {{ end }}

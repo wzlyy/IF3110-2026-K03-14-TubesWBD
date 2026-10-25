@@ -341,11 +341,13 @@ func TestViewerHTTPAuthorizationAndSSR(t *testing.T) {
 	quotedTable := `quoted "&/ + 雪`
 	headerURL := func(t *testing.T, body, label string) string {
 		t.Helper()
-		match := regexp.MustCompile(`<a class="btn btn-(?:primary|secondary)" href="([^"]*)">` + regexp.QuoteMeta(label) + `</a>`).FindStringSubmatch(body)
-		if len(match) != 2 {
-			t.Fatalf("missing header action %q", label)
+		for _, match := range regexp.MustCompile(`<a class="btn btn-(?:primary|secondary)" href="([^"]*)">([^<]*)</a>`).FindAllStringSubmatch(body, -1) {
+			if strings.Join(strings.Fields(html.UnescapeString(match[2])), " ") == label {
+				return html.UnescapeString(match[1])
+			}
 		}
-		return html.UnescapeString(match[1])
+		t.Fatalf("missing header action %q", label)
+		return ""
 	}
 	for _, tc := range []struct{ source, label, target string }{
 		{"schema", "Lihat data", "data"}, {"data", "Lihat skema", "schema"},
@@ -372,7 +374,7 @@ func TestViewerHTTPAuthorizationAndSSR(t *testing.T) {
 			}
 			selectedText := schema + "." + quotedTable
 			decoded := html.UnescapeString(switched)
-			if !strings.Contains(decoded, `aria-current="page">`+selectedText+`</a>`) {
+			if !regexp.MustCompile(`aria-current="page"\s*>` + regexp.QuoteMeta(selectedText) + `</a>`).MatchString(decoded) {
 				t.Errorf("header switched away from selected quoted table: expected %q, actual %q", selectedText, regexp.MustCompile(`aria-current="page"[^<]*</a>`).FindString(decoded))
 			}
 			if tc.target == "data" {

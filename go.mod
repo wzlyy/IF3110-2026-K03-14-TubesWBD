@@ -1,6 +1,6 @@
 module github.com/wzlyy/IF3110-2026-K03-14-TubesWBD
 
-go 1.27.0
+go 1.27.3
 
 require (
 	github.com/go-sql-driver/mysql v1.10.1

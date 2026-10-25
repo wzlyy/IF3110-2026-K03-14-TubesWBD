@@ -42,8 +42,10 @@ func (h *Handler) ProcessDiff(w http.ResponseWriter, r *http.Request) {
 
 	// Read input JSON from either file upload or textarea form
 	var rawJSON string
+	var uploaded bool
 	if err := r.ParseMultipartForm(32 * 1024); err == nil && r.MultipartForm != nil {
 		if fileHeaders, exists := r.MultipartForm.File["schema_file"]; exists && len(fileHeaders) > 0 {
+			uploaded = true
 			file, err := fileHeaders[0].Open()
 			if err == nil {
 				defer file.Close()
@@ -51,6 +53,12 @@ func (h *Handler) ProcessDiff(w http.ResponseWriter, r *http.Request) {
 				rawJSON = string(buf)
 			}
 		}
+	}
+	if uploaded && strings.TrimSpace(r.PostForm.Get("target_schema_json")) != "" {
+		data["RawInputJSON"] = r.PostForm.Get("target_schema_json")
+		data["ErrorMessage"] = "Pilih satu sumber skema: textarea JSON atau berkas JSON."
+		h.render(w, r, "diff", 422, data)
+		return
 	}
 	if strings.TrimSpace(rawJSON) == "" {
 		if err := r.ParseForm(); err == nil {

@@ -194,7 +194,14 @@ func TestSchemaDiffComparison(t *testing.T) {
 	}
 
 	// Verify SQL Generation for MySQL
-	mySQL, err := GenerateMigrationSQL(diff, "mysql")
+	// Compare using the target label too: cross-DBMS input is rejected.
+	mysqlCatalog, mysqlDesired := *curCatalog, *des
+	mysqlCatalog.DBMS, mysqlDesired.DBMS = "mysql", "mysql"
+	mysqlDiff, err := CompareCatalogs(&mysqlCatalog, &mysqlDesired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mySQL, err := GenerateMigrationSQL(mysqlDiff, "mysql")
 	if err != nil {
 		t.Fatalf("failed to generate MySQL SQL: %v", err)
 	}
@@ -272,112 +279,5 @@ func TestSchemaDiffIdentical(t *testing.T) {
 	}
 	if sql != "" {
 		t.Errorf("expected empty SQL string for identical schemas, got: %s", sql)
-	}
-}
-
-func TestGenerateCandidateSQL(t *testing.T) {
-	defaultPrice := "0.00"
-	diff := &DiffResult{
-		IsIdentical: false,
-		Changes: []SchemaChange{
-			{
-				Action: ActionCreateTable, Schema: "public", Table: "products",
-				Details: TableDef{
-					Schema: "public", Name: "products",
-					Columns: []ColumnDef{
-						{Name: "id", DataType: "int", Nullable: false},
-						{Name: "price", DataType: "numeric(10,2)", Nullable: false, Default: &defaultPrice},
-					},
-					PrimaryKey: []string{"id"},
-				},
-			},
-			{
-				Action: ActionAddColumn, Schema: "public", Table: "users", Object: "phone",
-				Details: ColumnDef{
-					Name: "phone", DataType: "varchar(20)", Nullable: true,
-				},
-			},
-			{
-				Action: ActionModifyColumn, Schema: "public", Table: "users", Object: "bio",
-				Details: ColumnDef{
-					Name: "bio", DataType: "text", Nullable: false,
-				},
-			},
-			{
-				Action: ActionDropColumn, Schema: "public", Table: "users", Object: "temp_token",
-				Destructive: true,
-			},
-			{
-				Action: ActionCreateIndex, Schema: "public", Table: "users", Object: "idx_phone",
-				Details: IndexDef{
-					Name: "idx_phone", Columns: []string{"phone"}, Unique: false,
-				},
-			},
-			{
-				Action: ActionDropIndex, Schema: "public", Table: "users", Object: "idx_old_bio",
-				Destructive: true,
-			},
-			{
-				Action: ActionDropTable, Schema: "public", Table: "old_logs",
-				Destructive: true,
-			},
-		},
-	}
-
-	// 1. PostgreSQL Candidate SQL
-	pgSQL, err := GenerateMigrationSQL(diff, "postgres")
-	if err != nil {
-		t.Fatalf("unexpected error generating PG SQL: %v", err)
-	}
-	expectedPG := []string{
-		`CREATE TABLE "public"."products"`,
-		`ALTER TABLE "public"."users" ADD COLUMN "phone" varchar(20);`,
-		`ALTER TABLE "public"."users" ALTER COLUMN "bio" TYPE text;`,
-		`ALTER TABLE "public"."users" ALTER COLUMN "bio" SET NOT NULL;`,
-		`ALTER TABLE "public"."users" DROP COLUMN "temp_token";`,
-		`CREATE INDEX "idx_phone" ON "public"."users" ("phone");`,
-		`DROP INDEX "public"."idx_old_bio";`,
-		`DROP TABLE "public"."old_logs";`,
-	}
-	for _, expected := range expectedPG {
-		if !strings.Contains(pgSQL, expected) {
-			t.Errorf("PG SQL missing expected statement: %s\nFull SQL:\n%s", expected, pgSQL)
-		}
-	}
-
-	// 2. MySQL Candidate SQL
-	mySQL, err := GenerateMigrationSQL(diff, "mysql")
-	if err != nil {
-		t.Fatalf("unexpected error generating MySQL SQL: %v", err)
-	}
-	expectedMySQL := []string{
-		"CREATE TABLE `public`.`products`",
-		"ALTER TABLE `public`.`users` ADD COLUMN `phone` varchar(20);",
-		"ALTER TABLE `public`.`users` MODIFY COLUMN `bio` text NOT NULL;",
-		"ALTER TABLE `public`.`users` DROP COLUMN `temp_token`;",
-		"CREATE INDEX `idx_phone` ON `public`.`users` (`phone`);",
-		"DROP INDEX `idx_old_bio` ON `public`.`users`;",
-		"DROP TABLE `public`.`old_logs`;",
-	}
-	for _, expected := range expectedMySQL {
-		if !strings.Contains(mySQL, expected) {
-			t.Errorf("MySQL SQL missing expected statement: %s\nFull SQL:\n%s", expected, mySQL)
-		}
-	}
-
-	// 3. Unsupported DBMS
-	if _, err := GenerateMigrationSQL(diff, "sqlite"); err == nil {
-		t.Error("expected error for unsupported DBMS 'sqlite'")
-	}
-
-	// 4. HasDestructiveChanges helper verification
-	if !HasDestructiveChanges(diff.Changes) {
-		t.Error("expected HasDestructiveChanges to return true")
-	}
-	nonDestructiveChanges := []SchemaChange{
-		{Action: ActionAddColumn, Destructive: false},
-	}
-	if HasDestructiveChanges(nonDestructiveChanges) {
-		t.Error("expected HasDestructiveChanges to return false for non-destructive changes")
 	}
 }

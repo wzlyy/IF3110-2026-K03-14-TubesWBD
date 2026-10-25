@@ -1,6 +1,5 @@
 -- ==============================================================================
 -- Platform Database Initialization Script
--- Milestone 1: Metadata Platform Database
 -- ==============================================================================
 
 -- 1. Table users

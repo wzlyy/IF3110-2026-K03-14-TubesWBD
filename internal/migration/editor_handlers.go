@@ -80,7 +80,7 @@ func (h *Handler) Show(w http.ResponseWriter, r *http.Request) {
 	h.render(w, r, "editor", 200, data)
 }
 
-// Preview is phase 3B's entry point: POST sql_query to the selected target.
+// Preview accepts sql_query for the selected target.
 // It renders editable SQL without persisting an attempt or opening the target.
 func (h *Handler) Preview(w http.ResponseWriter, r *http.Request) {
 	data, ok := h.page(w, r, true)

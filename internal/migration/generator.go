@@ -3,6 +3,7 @@ package migration
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/database"
@@ -17,6 +18,9 @@ func GenerateMigrationSQL(diff *DiffResult, dbms string) (string, error) {
 	if dbms != "postgres" && dbms != "mysql" {
 		return "", database.ErrUnsupportedDBMS
 	}
+	if diff.DBMS != "" && diff.DBMS != dbms {
+		return "", fmt.Errorf("%w: DBMS diff tidak sesuai target", ErrInvalidTargetSchema)
+	}
 	if diff.IsIdentical || len(diff.Changes) == 0 {
 		return "", nil
 	}
@@ -24,30 +28,61 @@ func GenerateMigrationSQL(diff *DiffResult, dbms string) (string, error) {
 	// Group changes by action
 	buckets := make(map[DiffAction][]SchemaChange)
 	for _, c := range diff.Changes {
+		switch c.Action {
+		case ActionDropConstraint, ActionDropIndex, ActionCreateTable, ActionAddColumn, ActionModifyColumn, ActionDropColumn, ActionDropTable, ActionAddConstraint, ActionCreateIndex:
+		default:
+			return "", fmt.Errorf("aksi perubahan belum didukung: %s", c.Action)
+		}
+		if strings.EqualFold(c.Table, "_dbplatform_migration_receipts") {
+			return "", fmt.Errorf("%w: tabel bukti migration internal tidak boleh diubah", ErrInvalidTargetSchema)
+		}
 		buckets[c.Action] = append(buckets[c.Action], c)
+		if c.Action == ActionCreateTable {
+			table, ok := c.Details.(TableDef)
+			if !ok {
+				return "", errors.New("metadata TableDef tidak valid")
+			}
+			// Create every table before attaching foreign keys and other objects.
+			for _, con := range table.Constraints {
+				buckets[ActionAddConstraint] = append(buckets[ActionAddConstraint], SchemaChange{Action: ActionAddConstraint, Schema: c.Schema, Table: c.Table, Object: con.Name, Details: con})
+			}
+			for _, idx := range table.Indexes {
+				buckets[ActionCreateIndex] = append(buckets[ActionCreateIndex], SchemaChange{Action: ActionCreateIndex, Schema: c.Schema, Table: c.Table, Object: idx.Name, Details: idx})
+			}
+		}
 	}
 
-	// Order statements in safe dependency order:
-	// 1. Create Tables (new tables must exist first)
-	// 2. Add Columns (new columns on existing tables)
-	// 3. Modify Columns
-	// 4. Add Constraints (foreign keys require referenced tables/columns to exist)
-	// 5. Create Indexes
-	// 6. Drop Indexes
-	// 7. Drop Constraints (drop foreign keys before dropping referenced tables/columns)
-	// 8. Drop Columns
-	// 9. Drop Tables
+	// Remove old dependencies before replacing objects with the same names.
+	// Attach keys after table/column changes, then restore foreign keys.
 	orderedActions := []DiffAction{
+		ActionDropConstraint,
+		ActionDropIndex,
 		ActionCreateTable,
 		ActionAddColumn,
 		ActionModifyColumn,
-		ActionAddConstraint,
-		ActionCreateIndex,
-		ActionDropIndex,
-		ActionDropConstraint,
 		ActionDropColumn,
 		ActionDropTable,
+		ActionAddConstraint,
+		ActionCreateIndex,
+		DiffAction("ADD_FOREIGN_KEY"),
 	}
+	// A foreign key can reference a standalone UNIQUE index, so all indexes
+	// must exist before attaching foreign keys as well as primary/unique keys.
+	var keys []SchemaChange
+	for _, change := range buckets[ActionAddConstraint] {
+		con, _ := change.Details.(ConstraintDef)
+		if strings.EqualFold(con.Type, "FOREIGN KEY") {
+			buckets[DiffAction("ADD_FOREIGN_KEY")] = append(buckets[DiffAction("ADD_FOREIGN_KEY")], change)
+		} else {
+			keys = append(keys, change)
+		}
+	}
+	buckets[ActionAddConstraint] = keys
+	// Foreign keys must be removed before their referenced keys, then restored
+	// after primary/unique keys. Stable sorting preserves deterministic output.
+	sort.SliceStable(buckets[ActionDropConstraint], func(i, j int) bool {
+		return strings.EqualFold(buckets[ActionDropConstraint][i].OldValue, "FOREIGN KEY") && !strings.EqualFold(buckets[ActionDropConstraint][j].OldValue, "FOREIGN KEY")
+	})
 
 	var statements []string
 	for _, action := range orderedActions {
@@ -169,6 +204,8 @@ func generateStatement(ch SchemaChange, dbms string) (string, error) {
 		}
 		if colDef.Default != nil {
 			pgParts = append(pgParts, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET DEFAULT %s;", tableQualified, colQ, *colDef.Default))
+		} else {
+			pgParts = append(pgParts, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s DROP DEFAULT;", tableQualified, colQ))
 		}
 		return strings.Join(pgParts, "\n"), nil
 
@@ -243,6 +280,12 @@ func generateStatement(ch SchemaChange, dbms string) (string, error) {
 			return "", err
 		}
 		if dbms == "mysql" {
+			if strings.EqualFold(ch.OldValue, "PRIMARY KEY") {
+				return fmt.Sprintf("ALTER TABLE %s DROP PRIMARY KEY;", tableQualified), nil
+			}
+			if strings.EqualFold(ch.OldValue, "UNIQUE") {
+				return fmt.Sprintf("ALTER TABLE %s DROP INDEX %s;", tableQualified, conQ), nil
+			}
 			if strings.Contains(strings.ToLower(ch.OldValue), "foreign") {
 				return fmt.Sprintf("ALTER TABLE %s DROP FOREIGN KEY %s;", tableQualified, conQ), nil
 			}

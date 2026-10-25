@@ -1,0 +1,20 @@
+name: Quality checks
+on: [push, pull_request]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go vet ./...
+      - run: go build ./cmd/server
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      - run: docker compose -p wbd-test -f compose.test.yaml up -d --wait
+      - name: Unit and integration scenarios
+        shell: pwsh
+        run: ./scripts/test-integration.ps1
+      - if: always()
+        run: docker compose -p wbd-test -f compose.test.yaml down

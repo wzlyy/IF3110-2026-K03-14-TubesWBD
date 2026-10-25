@@ -70,6 +70,7 @@ func ValidateExplainSQL(dbms, query string, analyze bool) (string, error) {
 	}
 	var cleaned strings.Builder
 	state := byte(0)
+	terminated := false
 	for i := 0; i < len(query); i++ {
 		c := query[i]
 		switch state {
@@ -110,6 +111,9 @@ func ValidateExplainSQL(dbms, query string, analyze bool) (string, error) {
 			continue
 		}
 		if c == '\'' || c == '"' || (c == '`' && dbms == "mysql") {
+			if terminated {
+				return "", ErrExplainStatement
+			}
 			state = c
 			cleaned.WriteByte(' ')
 			continue
@@ -130,6 +134,14 @@ func ValidateExplainSQL(dbms, query string, analyze bool) (string, error) {
 			return "", ErrExplainStatement
 		}
 		if c == ';' {
+			if terminated {
+				return "", ErrExplainStatement
+			}
+			terminated = true
+			continue
+		}
+		// One final delimiter is allowed; only whitespace/comments may follow.
+		if terminated && !strings.ContainsRune(" \t\r\n\f", rune(c)) {
 			return "", ErrExplainStatement
 		}
 		cleaned.WriteByte(c)

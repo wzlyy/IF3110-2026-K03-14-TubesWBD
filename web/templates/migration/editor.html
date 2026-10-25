@@ -1,48 +1,69 @@
-{{ define "title" }}Editor Migration - DB Platform{{ end }}
+{{ define "title" }}Editor Migration — Database Platform{{ end }}
 {{ define "content" }}
 <section class="database-page">
-    <a href="/databases" class="database-back">Kembali ke daftar database</a>
+    <a href="/databases" class="database-back">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+        Kembali ke daftar database
+    </a>
     <div class="page-header">
         <div>
-            <h1>Editor migration{{ if .Connection }}: {{ .Connection.Name }}{{ end }}</h1>{{ if .Connection }}<p
-                class="text-secondary">{{ .Connection.DBName }} <span class="badge {{ if eq .Connection.DBMS " mysql"
-                    }}badge-dbms-mysql{{ else }}badge-dbms-postgres{{ end }}">{{ if eq .Connection.DBMS "mysql"
-                    }}MySQL{{ else }}PostgreSQL{{ end }}</span> · {{ if .CanEdit }}Lihat &amp; edit{{ else }}Akses
-                terbatas{{ end }}</p>{{ end }}
+            <h1 class="page-title">Editor migration{{ if .Connection }}: {{ .Connection.Name }}{{ end }}</h1>
+            {{ if .Connection }}
+            <p class="page-subtitle">
+                <span class="connection-detail-badge">{{ .Connection.DBName }}</span>
+                {{ if eq .Connection.DBMS "mysql" }}
+                <span class="badge badge-dbms-mysql">MySQL</span>
+                {{ else }}
+                <span class="badge badge-dbms-postgres">PostgreSQL</span>
+                {{ end }}
+                ·
+                <span class="badge {{ if .CanEdit }}badge-view-edit{{ else }}badge-view-only{{ end }}">{{ if .CanEdit }}Lihat &amp; edit{{ else }}Akses terbatas{{ end }}</span>
+            </p>
+            {{ end }}
         </div>
-        <div class="connection-actions">{{ if .DiffURL }}<a class="btn btn-secondary" href="{{ .DiffURL }}">Schema
-                diff</a>{{ end }}{{ if .HistoryURL }}<a class="btn btn-secondary" href="{{ .HistoryURL }}">Riwayat
-                migration</a>{{ end }}</div>
+        <div class="connection-actions">
+            {{ if .DiffURL }}<a class="btn btn-secondary" href="{{ .DiffURL }}">Schema diff</a>{{ end }}
+            {{ if .HistoryURL }}<a class="btn btn-secondary" href="{{ .HistoryURL }}">Riwayat migration</a>{{ end }}
+        </div>
     </div>
+
     {{ if .CanEdit }}
-    {{ if eq .Connection.DBMS "mysql" }}<div class="alert alert-danger" role="note">Peringatan (MySQL): Perintah DDL
-        dapat melakukan implicit commit. Kegagalan di tengah eksekusi DDL multi-statement tidak dapat di-rollback
-        otomatis secara penuh.</div>{{ end }}
+    {{ if eq .Connection.DBMS "mysql" }}
+    <div class="alert alert-danger" role="note" style="margin-bottom: 1.5rem;">
+        <strong>Peringatan (MySQL):</strong> Perintah DDL dapat melakukan implicit commit. Kegagalan di tengah eksekusi DDL multi-statement tidak dapat di-rollback otomatis secara penuh.
+    </div>
+    {{ end }}
+
     <section class="card explain-form-card" aria-labelledby="migration-query-title">
-        <h2 id="migration-query-title">Susun dan tinjau SQL</h2>
-        <p class="connection-help" id="migration-query-help">DDL/DML, maksimum 16 KiB. Kontrol transaksi dikelola
-            runner. Pratinjau tidak menjalankan atau menyimpan SQL.</p>
+        <h2 id="migration-query-title" class="card-title">Susun dan tinjau SQL</h2>
+        <p class="connection-help" id="migration-query-help" style="margin-bottom: 1.25rem;">DDL/DML, maksimum 16 KiB. Kontrol transaksi dikelola runner. Pratinjau tidak menjalankan atau menyimpan SQL.</p>
         <form action="{{ .ExplainURL }}" method="POST">
             <input type="hidden" name="csrf_token" value="{{ .CSRFToken }}">
-            <div class="form-group"><label for="migration-query">Query SQL migration</label><textarea
-                    id="migration-query" name="sql_query" rows="9" maxlength="16384" required spellcheck="false"
+            <div class="form-group">
+                <label for="migration-query" class="form-label">Query SQL migration</label>
+                <textarea id="migration-query" name="sql_query" class="form-control form-textarea" rows="9" maxlength="16384" required spellcheck="false"
                     aria-describedby="migration-query-help"
-                    placeholder="UPDATE nama_tabel SET nilai = 1 WHERE id = 1">{{ .SQLQuery }}</textarea></div>
-            <div class="connection-actions"><button type="submit" class="btn btn-primary"
-                    formaction="{{ .BaseURL }}/preview">Pratinjau SQL</button><button type="submit"
-                    class="btn btn-secondary">Analyze Query Plan</button></div>
-            <p class="connection-help">Analisis memakai EXPLAIN standar untuk satu SELECT/DML, tanpa mode ANALYZE. DDL
-                tidak memiliki execution plan tabular; tetap dapat ditinjau dan dieksekusi sebagai migration.</p>
+                    placeholder="UPDATE nama_tabel SET nilai = 1 WHERE id = 1">{{ .SQLQuery }}</textarea>
+            </div>
+            <div class="connection-actions" style="margin-top: 1.25rem;">
+                <button type="submit" class="btn btn-primary" formaction="{{ .BaseURL }}/preview">Pratinjau SQL</button>
+                <button type="submit" class="btn btn-secondary">Analyze Query Plan</button>
+            </div>
+            <p class="connection-help" style="margin-top: 0.75rem;">Analisis memakai EXPLAIN standar untuk satu SELECT/DML, tanpa mode ANALYZE. DDL tidak memiliki execution plan tabular; tetap dapat ditinjau dan dieksekusi sebagai migration.</p>
         </form>
     </section>
+
     {{ if .Preview }}
     <section class="card migration-preview" aria-labelledby="preview-title">
-        <h2 id="preview-title">Pratinjau SQL</h2>
-        <p>{{ .StatementCount }} pernyataan SQL akan dijalankan pada <strong>{{ .Connection.Name }}</strong>.</p>
+        <div class="card-header">
+            <h2 id="preview-title" class="card-title">Pratinjau SQL</h2>
+            <span class="badge badge-user">{{ .StatementCount }} Pernyataan</span>
+        </div>
+        <p class="connection-help" style="margin-bottom: 1rem;">{{ .StatementCount }} pernyataan SQL akan dijalankan pada <strong>{{ .Connection.Name }}</strong>.</p>
         <pre class="migration-sql"><code>{{ .SQLQuery }}</code></pre>
-        <form action="{{ .BaseURL }}/execute" method="POST">
-            <input type="hidden" name="csrf_token" value="{{ .CSRFToken }}"><input type="hidden" name="sql_query"
-                value="{{ .SQLQuery }}">
+        <form action="{{ .BaseURL }}/execute" method="POST" style="margin-top: 1.25rem;">
+            <input type="hidden" name="csrf_token" value="{{ .CSRFToken }}">
+            <input type="hidden" name="sql_query" value="{{ .SQLQuery }}">
             <button type="submit" class="btn btn-primary">Eksekusi SQL yang ditinjau</button>
         </form>
     </section>

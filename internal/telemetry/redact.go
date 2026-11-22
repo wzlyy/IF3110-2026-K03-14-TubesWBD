@@ -85,8 +85,8 @@ func RedactString(s string) string {
 
 // SanitizeLogString menghapus karakter CR/LF agar mencegah log injection.
 func SanitizeLogString(s string) string {
+	s = strings.ReplaceAll(s, "\n", "")
 	s = strings.ReplaceAll(s, "\r", "")
-	s = strings.ReplaceAll(s, "\n", " ")
 	return s
 }
 
@@ -127,8 +127,10 @@ func RedactParams(params []any) []any {
 			sanitized[i] = redacted
 		case []byte:
 			sanitized[i] = fmt.Sprintf("<%d bytes>", len(v))
-		default:
+		case bool, int, int32, int64, uint, uint32, uint64, float32, float64:
 			sanitized[i] = v
+		default:
+			sanitized[i] = SanitizeLogString(RedactString(fmt.Sprint(v)))
 		}
 	}
 	return sanitized

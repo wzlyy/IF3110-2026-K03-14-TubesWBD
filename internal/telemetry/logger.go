@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -155,13 +156,13 @@ func LogEvent(ctx context.Context, level slog.Level, event, status string, extra
 		corrID = traceID
 	}
 
-	event = strings.ReplaceAll(strings.ReplaceAll(event, "\r", ""), "\n", " ")
-	actor = strings.ReplaceAll(strings.ReplaceAll(actor, "\r", ""), "\n", " ")
-	database = strings.ReplaceAll(strings.ReplaceAll(database, "\r", ""), "\n", " ")
-	status = strings.ReplaceAll(strings.ReplaceAll(status, "\r", ""), "\n", " ")
-	corrID = strings.ReplaceAll(strings.ReplaceAll(corrID, "\r", ""), "\n", " ")
-	traceID = strings.ReplaceAll(strings.ReplaceAll(traceID, "\r", ""), "\n", " ")
-	spanID = strings.ReplaceAll(strings.ReplaceAll(spanID, "\r", ""), "\n", " ")
+	event = strings.ReplaceAll(strings.ReplaceAll(event, "\n", ""), "\r", "")
+	actor = strings.ReplaceAll(strings.ReplaceAll(actor, "\n", ""), "\r", "")
+	database = strings.ReplaceAll(strings.ReplaceAll(database, "\n", ""), "\r", "")
+	status = strings.ReplaceAll(strings.ReplaceAll(status, "\n", ""), "\r", "")
+	corrID = strings.ReplaceAll(strings.ReplaceAll(corrID, "\n", ""), "\r", "")
+	traceID = strings.ReplaceAll(strings.ReplaceAll(traceID, "\n", ""), "\r", "")
+	spanID = strings.ReplaceAll(strings.ReplaceAll(spanID, "\n", ""), "\r", "")
 
 	attrs := make([]slog.Attr, 0, 12+len(extra))
 	attrs = append(attrs,
@@ -191,14 +192,38 @@ func LogEvent(ctx context.Context, level slog.Level, event, status string, extra
 		attrs = append(attrs, slog.Int("batch_number", meta.BatchNumber))
 	}
 
+	// Rekonstruksi setiap atribut tanpa melewatkan attr mentah agar bebas log injection.
 	for _, attr := range extra {
-		if IsSensitiveKey(attr.Key) {
-			attrs = append(attrs, slog.String(attr.Key, RedactedValue))
-		} else if attr.Value.Kind() == slog.KindString {
-			clean := strings.ReplaceAll(strings.ReplaceAll(attr.Value.String(), "\r", ""), "\n", " ")
-			attrs = append(attrs, slog.String(attr.Key, clean))
-		} else {
-			attrs = append(attrs, attr)
+		key := SanitizeLogString(attr.Key)
+		if IsSensitiveKey(key) {
+			attrs = append(attrs, slog.String(key, RedactedValue))
+			continue
+		}
+		switch attr.Value.Kind() {
+		case slog.KindString:
+			clean := strings.ReplaceAll(strings.ReplaceAll(attr.Value.String(), "\n", ""), "\r", "")
+			attrs = append(attrs, slog.String(key, clean))
+		case slog.KindInt64:
+			attrs = append(attrs, slog.Int64(key, attr.Value.Int64()))
+		case slog.KindUint64:
+			attrs = append(attrs, slog.Uint64(key, attr.Value.Uint64()))
+		case slog.KindFloat64:
+			attrs = append(attrs, slog.Float64(key, attr.Value.Float64()))
+		case slog.KindBool:
+			attrs = append(attrs, slog.Bool(key, attr.Value.Bool()))
+		case slog.KindDuration:
+			attrs = append(attrs, slog.Duration(key, attr.Value.Duration()))
+		case slog.KindTime:
+			attrs = append(attrs, slog.Time(key, attr.Value.Time()))
+		default:
+			if params, ok := attr.Value.Any().([]any); ok {
+				attrs = append(attrs, slog.Any(key, RedactParams(params)))
+			} else if attr.Value.Any() != nil {
+				clean := strings.ReplaceAll(strings.ReplaceAll(fmt.Sprint(attr.Value.Any()), "\n", ""), "\r", "")
+				attrs = append(attrs, slog.String(key, clean))
+			} else {
+				attrs = append(attrs, slog.Any(key, nil))
+			}
 		}
 	}
 

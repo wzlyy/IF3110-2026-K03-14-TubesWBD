@@ -16,7 +16,9 @@ type Statement struct{ SQL, Kind string }
 // comments or PostgreSQL dollar bodies. Transaction ownership stays with Runner.
 // This is a bounded statement lexer; the target still validates SQL grammar.
 func ValidateSQL(dbms, query string) ([]Statement, error) {
-	if (dbms != "postgres" && dbms != "mysql") || len(query) > MaxSQLBytes || strings.ContainsRune(query, 0) || strings.Contains(strings.ToLower(query), "_dbplatform_migration_receipts") {
+	lowerQuery := strings.ToLower(query)
+	if (dbms != "postgres" && dbms != "mysql") || len(query) > MaxSQLBytes || strings.ContainsRune(query, 0) ||
+		strings.Contains(lowerQuery, "_dbplatform_migration_receipts") || strings.Contains(lowerQuery, "_platform_meta") {
 		return nil, ErrInvalidSQL
 	}
 	var statements []Statement

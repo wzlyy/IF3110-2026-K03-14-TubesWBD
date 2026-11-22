@@ -16,10 +16,15 @@ import (
 
 // Connection is safe to render: it never contains credentials.
 type Connection struct {
-	ID, Name, DBMS, Host string
-	Port                 int
-	DBName, Username     string
-	CreatedAt, UpdatedAt time.Time
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	DBMS      string    `json:"dbms"`
+	Host      string    `json:"host"`
+	Port      int       `json:"port"`
+	DBName    string    `json:"db_name"`
+	Username  string    `json:"username"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 var ErrConnectionNotFound = errors.New("connection not found")

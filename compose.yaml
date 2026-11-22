@@ -16,7 +16,7 @@ services:
       test: ["CMD-SHELL", "pg_isready -U ${PLATFORM_DB_USER:-postgres} -d ${PLATFORM_DB_NAME:-platform_db}"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   target-postgres:
     image: postgres:16-alpine
@@ -34,12 +34,49 @@ services:
       test: ["CMD-SHELL", "pg_isready -U ${TARGET_PG_USER:-postgres} -d ${TARGET_PG_NAME:-target_db}"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+
+  target-postgres-2:
+    image: postgres:16-alpine
+    container_name: tubeswbd-target-postgres-2
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${TARGET_PG2_USER:-postgres}
+      POSTGRES_PASSWORD: ${TARGET_PG2_PASSWORD:-postgres}
+      POSTGRES_DB: ${TARGET_PG2_NAME:-target_db_2}
+    ports:
+      - "${TARGET_PG2_PORT:-5434}:5432"
+    volumes:
+      - target_pg2_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TARGET_PG2_USER:-postgres} -d ${TARGET_PG2_NAME:-target_db_2}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: tubeswbd-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-guest}
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_MGMT_PORT:-15672}:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
 
   target-mysql:
     image: mysql:8.0
     container_name: tubeswbd-target-mysql
     restart: unless-stopped
+    profiles: ["legacy-mysql"]
     environment:
       MYSQL_ROOT_PASSWORD: ${TARGET_MYSQL_ROOT_PASSWORD:-rootpassword}
       MYSQL_DATABASE: ${TARGET_MYSQL_NAME:-target_db}
@@ -51,9 +88,43 @@ services:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${TARGET_MYSQL_ROOT_PASSWORD:-rootpassword}"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+
+  backend-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+    container_name: tubeswbd-backend-api
+    restart: unless-stopped
+    profiles: ["app"]
+    environment:
+      PORT: ${PORT:-8080}
+      APP_ENV: ${APP_ENV:-development}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-12345678901234567890123456789012}
+      ADMIN_INITIAL_USERNAME: ${ADMIN_INITIAL_USERNAME:-admin}
+      ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:-LocalDevAdmin!2026}
+      PLATFORM_DB_HOST: platform-db
+      PLATFORM_DB_PORT: 5432
+      PLATFORM_DB_USER: ${PLATFORM_DB_USER:-postgres}
+      PLATFORM_DB_PASSWORD: ${PLATFORM_DB_PASSWORD:-postgres}
+      PLATFORM_DB_NAME: ${PLATFORM_DB_NAME:-platform_db}
+      PLATFORM_DB_SSLMODE: disable
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672/
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-db-platform-api}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      SPA_DIST_DIR: ${SPA_DIST_DIR:-/app/frontend/dist}
+    ports:
+      - "${PORT:-8080}:8080"
+    depends_on:
+      platform-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
 
 volumes:
   platform_data:
   target_pg_data:
+  target_pg2_data:
   target_mysql_data:
+  rabbitmq_data:

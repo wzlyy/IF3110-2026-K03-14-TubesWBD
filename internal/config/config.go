@@ -54,6 +54,12 @@ type Config struct {
 	AdminInitialPassword string
 	PlatformDB           PlatformDBConfig
 	CookieSecure         bool
+	RabbitMQURL          string
+	OTelServiceName      string
+	OTelOTLPEndpoint     string
+	SPADistDir           string
+	WorkerID             string
+	MetricsPort          string
 }
 
 // IsProduction returns true if the current environment is production.
@@ -112,7 +118,13 @@ func Load() (*Config, error) {
 			DBName:   getEnv("PLATFORM_DB_NAME", "platform_db"),
 			SSLMode:  getEnv("PLATFORM_DB_SSLMODE", "disable"),
 		},
-		CookieSecure: cookieSecure,
+		CookieSecure:     cookieSecure,
+		RabbitMQURL:      getEnv("RABBITMQ_URL", "amqp://guest:guest@127.0.0.1:5672/"),
+		OTelServiceName:  getEnv("OTEL_SERVICE_NAME", "db-platform-api"),
+		OTelOTLPEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		SPADistDir:       getEnv("SPA_DIST_DIR", "frontend/dist"),
+		WorkerID:         getEnv("WORKER_ID", "worker-1"),
+		MetricsPort:      getEnv("METRICS_PORT", "9091"),
 	}
 
 	return cfg, nil

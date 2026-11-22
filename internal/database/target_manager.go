@@ -167,6 +167,33 @@ func (m *TargetManager) Close() error {
 	return nil
 }
 
+// AggregatePoolStats menjumlahkan sql.DBStats dari seluruh pool target aktif untuk metrik Prometheus.
+func (m *TargetManager) AggregatePoolStats() sql.DBStats {
+	m.mu.Lock()
+	dbs := make([]*sql.DB, 0, len(m.pools))
+	for _, p := range m.pools {
+		if p != nil && p.db != nil {
+			dbs = append(dbs, p.db)
+		}
+	}
+	m.mu.Unlock()
+
+	var total sql.DBStats
+	for _, db := range dbs {
+		st := db.Stats()
+		total.MaxOpenConnections += st.MaxOpenConnections
+		total.OpenConnections += st.OpenConnections
+		total.InUse += st.InUse
+		total.Idle += st.Idle
+		total.WaitCount += st.WaitCount
+		total.WaitDuration += st.WaitDuration
+		total.MaxIdleClosed += st.MaxIdleClosed
+		total.MaxIdleTimeClosed += st.MaxIdleTimeClosed
+		total.MaxLifetimeClosed += st.MaxLifetimeClosed
+	}
+	return total
+}
+
 // Test checks saved settings within five seconds. Driver errors never escape.
 func (m *TargetManager) Test(ctx context.Context, id string) error {
 	ctx, cancel := context.WithTimeout(ctx, targetTimeout)

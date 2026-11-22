@@ -14,6 +14,7 @@ import (
 
 	mysql "github.com/go-sql-driver/mysql"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/telemetry"
 )
 
 const DataPageSize = 50
@@ -113,7 +114,12 @@ func ReadTableData(ctx context.Context, target *sql.DB, dbms string, catalogTabl
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	tx, err := target.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	dbLabel := telemetry.DatabaseFromContext(ctx)
+	if dbLabel == "" {
+		dbLabel = catalogTable.Schema + "." + catalogTable.Name
+	}
+	idb := telemetry.WrapDB(target, dbLabel)
+	tx, err := idb.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, ErrTargetUnavailable
 	}

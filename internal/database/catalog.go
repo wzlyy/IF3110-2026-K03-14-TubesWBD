@@ -6,6 +6,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/telemetry"
 )
 
 // Catalog is a database snapshot. Names retain their original case and schema.
@@ -95,21 +97,22 @@ func LoadCatalog(ctx context.Context, target *sql.DB, dbms, dbName string) (*Cat
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	tx, err := target.BeginTx(ctx, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
+	idb := telemetry.WrapDB(target, dbName)
+	itx, err := idb.BeginTx(ctx, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
 	if err != nil {
 		return nil, ErrTargetUnavailable
 	}
-	defer tx.Rollback()
+	defer itx.Rollback()
 	var catalog *Catalog
 	if dbms == "postgres" {
-		catalog, err = loadPostgresCatalog(ctx, tx, dbName)
+		catalog, err = loadPostgresCatalog(ctx, itx, dbName)
 	} else {
-		catalog, err = loadMySQLCatalog(ctx, tx, dbName)
+		catalog, err = loadMySQLCatalog(ctx, itx.Tx, dbName)
 	}
 	if err != nil {
 		return nil, ErrTargetUnavailable
 	}
-	if err = tx.Commit(); err != nil {
+	if err = itx.Commit(); err != nil {
 		return nil, ErrTargetUnavailable
 	}
 	return catalog, nil

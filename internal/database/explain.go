@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/telemetry"
 )
 
 const (
@@ -208,7 +210,8 @@ func RunExplain(ctx context.Context, target *sql.DB, dbms, query string, analyze
 		// unconditional rollback remain in effect; ANALYZE is SELECT-only.
 		readOnly = analyze || kind == "SELECT"
 	}
-	tx, err := target.BeginTx(ctx, &sql.TxOptions{ReadOnly: readOnly})
+	idb := telemetry.WrapDB(target, telemetry.DatabaseFromContext(ctx))
+	tx, err := idb.BeginTx(ctx, &sql.TxOptions{ReadOnly: readOnly})
 	if err != nil {
 		return nil, ErrExplainUnavailable
 	}
@@ -224,7 +227,7 @@ func RunExplain(ctx context.Context, target *sql.DB, dbms, query string, analyze
 	}
 	defer stmt.Close()
 	var raw string
-	if err = stmt.QueryRowContext(ctx).Scan(&raw); err != nil {
+	if err = tx.QueryRowPrepared(ctx, stmt, statement, &raw); err != nil {
 		return nil, ErrExplainUnavailable
 	}
 	return ParseExplainPlan(dbms, raw, analyze)

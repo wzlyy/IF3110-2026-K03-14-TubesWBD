@@ -1,0 +1,207 @@
+import http from 'k6/http';
+import { check, sleep } from 'k6';
+import exec from 'k6/execution';
+import { Counter, Rate, Trend } from 'k6/metrics';
+import { textSummary } from 'https://jslib.k6.io/k6-summary/0.0.4/index.js';
+
+// Metrik kustom untuk memisahkan respons enqueue HTTP (202) dari penyelesaian job asinkron.
+const queueWaitMS = new Trend('migration_queue_wait_ms', true);
+const jobCompletionDurationMS = new Trend('migration_job_completion_duration_ms', true);
+const jobsCompletedTotal = new Counter('migration_jobs_completed_total');
+const jobsFailedTotal = new Counter('migration_jobs_failed_total');
+const jobSuccessRate = new Rate('migration_job_success_rate');
+
+const BASE_URL = __ENV.BASE_URL || 'http://127.0.0.1:8080';
+const USERNAME = __ENV.K6_USERNAME || 'editor_core';
+const PASSWORD = __ENV.K6_PASSWORD || 'DevPass!2026';
+const DB1_ID = __ENV.K6_DB1_ID || '';
+const DB2_ID = __ENV.K6_DB2_ID || '';
+// Daftar ID request pra-persetujuan (dipisah koma) dari tests/k6/setup_preapproved.ps1
+const SAME_DB_REQUEST_IDS = (__ENV.K6_SAME_DB_REQUEST_IDS || '').split(',').filter(Boolean);
+const DIFF_DB_REQUEST_IDS = (__ENV.K6_DIFF_DB_REQUEST_IDS || '').split(',').filter(Boolean);
+const POLL_TIMEOUT_SEC = parseInt(__ENV.K6_POLL_TIMEOUT_SEC || '90', 10);
+
+// Selang-selingkan request DB sama dan DB berbeda agar tiap request di-enqueue sekali saja
+// sehingga terhindar dari konflik 409 sambil menguji kontensi lock dan paralelisme.
+const JOB_QUEUE = [];
+const maxLen = Math.max(SAME_DB_REQUEST_IDS.length, DIFF_DB_REQUEST_IDS.length);
+for (let i = 0; i < maxLen; i++) {
+  if (i < SAME_DB_REQUEST_IDS.length) {
+    JOB_QUEUE.push({ requestId: SAME_DB_REQUEST_IDS[i], scenarioType: 'same_db' });
+  }
+  if (i < DIFF_DB_REQUEST_IDS.length) {
+    JOB_QUEUE.push({ requestId: DIFF_DB_REQUEST_IDS[i], scenarioType: 'diff_db' });
+  }
+}
+
+const scenarios = {
+  // Skenario 1: Beban baca naik bertahap (10 -> 30 -> 60 -> 100 VU) lalu turun untuk pemulihan (10 -> 0 VU)
+  api_read_stress: {
+    executor: 'ramping-vus',
+    exec: 'runReadTraffic',
+    startVUs: 0,
+    stages: [
+      { duration: '30s', target: 10 },  // Beban normal
+      { duration: '30s', target: 30 },  // Kenaikan tahap 1
+      { duration: '30s', target: 60 },  // Beban tinggi
+      { duration: '30s', target: 100 }, // Beban puncak
+      { duration: '30s', target: 10 },  // Penurunan pemulihan
+      { duration: '20s', target: 0 },   // Pendinginan
+    ],
+  },
+};
+
+if (JOB_QUEUE.length > 0) {
+  // Skenario 2: Enqueue job migrasi pra-persetujuan secara bersamaan lalu polling hingga selesai
+  // Memakai shared-iterations agar setiap request_id diambil unik lewat iterationInTest.
+  scenarios.migration_job_stress = {
+    executor: 'shared-iterations',
+    exec: 'runMigrationJobs',
+    vus: Math.min(10, JOB_QUEUE.length),
+    iterations: JOB_QUEUE.length,
+    maxDuration: '3m',
+    startTime: '15s',
+  };
+}
+
+export const options = {
+  scenarios,
+  thresholds: {
+    http_req_duration: ['p(95)<500'],
+    http_req_failed: ['rate<0.02'],
+    ...(JOB_QUEUE.length > 0 ? { migration_job_success_rate: ['rate>0.95'] } : {}),
+  },
+};
+
+export function setup() {
+  const loginRes = http.post(
+    `${BASE_URL}/api/v1/auth/login`,
+    JSON.stringify({ username: USERNAME, password: PASSWORD }),
+    { headers: { 'Content-Type': 'application/json' } }
+  );
+  check(loginRes, {
+    'setup login status 200': (r) => r.status === 200,
+  });
+  const body = loginRes.json();
+  const cookie = loginRes.cookies.session_id ? loginRes.cookies.session_id[0].value : '';
+  return {
+    csrfToken: body ? body.csrf_token : '',
+    sessionCookie: cookie,
+  };
+}
+
+function authHeaders(data) {
+  return {
+    'Content-Type': 'application/json',
+    'X-CSRF-Token': data.csrfToken,
+    Cookie: `session_id=${data.sessionCookie}`,
+  };
+}
+
+function pollJobUntilDone(jobID, enqueuedAtMs, headers, scenarioTag) {
+  const deadline = Date.now() + POLL_TIMEOUT_SEC * 1000;
+  let recordedQueueWait = false;
+
+  while (Date.now() < deadline) {
+    const res = http.get(`${BASE_URL}/api/v1/jobs/${jobID}`, {
+      headers,
+      tags: { endpoint: 'job_status', scenario_type: scenarioTag },
+    });
+    if (res.status !== 200) {
+      sleep(0.5);
+      continue;
+    }
+    const view = res.json();
+    const status = view.execution ? view.execution.status : view.request_status;
+
+    if (!recordedQueueWait && view.execution && view.execution.started_at) {
+      const startedMs = Date.parse(view.execution.started_at);
+      if (!isNaN(startedMs) && startedMs >= enqueuedAtMs) {
+        queueWaitMS.add(startedMs - enqueuedAtMs, { scenario_type: scenarioTag });
+        recordedQueueWait = true;
+      }
+    }
+
+    if (status === 'success') {
+      jobCompletionDurationMS.add(Date.now() - enqueuedAtMs, { scenario_type: scenarioTag });
+      jobsCompletedTotal.add(1, { scenario_type: scenarioTag });
+      jobSuccessRate.add(true, { scenario_type: scenarioTag });
+      return true;
+    }
+    if (status === 'failed' || status === 'partial' || status === 'uncertain') {
+      jobCompletionDurationMS.add(Date.now() - enqueuedAtMs, { scenario_type: scenarioTag });
+      jobsFailedTotal.add(1, { scenario_type: scenarioTag });
+      jobSuccessRate.add(false, { scenario_type: scenarioTag });
+      return false;
+    }
+    sleep(0.25);
+  }
+
+  jobsFailedTotal.add(1, { scenario_type: scenarioTag });
+  jobSuccessRate.add(false, { scenario_type: scenarioTag });
+  return false;
+}
+
+export function runReadTraffic(data) {
+  const headers = authHeaders(data);
+
+  const listRes = http.get(`${BASE_URL}/api/v1/databases`, {
+    headers,
+    tags: { endpoint: 'list_databases' },
+  });
+  check(listRes, { 'GET /databases 200': (r) => r.status === 200 });
+
+  const targetDB = __VU % 2 === 0 && DB2_ID ? DB2_ID : DB1_ID;
+  if (targetDB) {
+    const histRes = http.get(`${BASE_URL}/api/v1/databases/${targetDB}/history?hide_rollback=false`, {
+      headers,
+      tags: { endpoint: 'history' },
+    });
+    check(histRes, { 'GET /history 200': (r) => r.status === 200 });
+
+    const schemaRes = http.get(`${BASE_URL}/api/v1/databases/${targetDB}/schema`, {
+      headers,
+      tags: { endpoint: 'schema' },
+    });
+    check(schemaRes, { 'GET /schema 200': (r) => r.status === 200 });
+  }
+
+  sleep(0.5);
+}
+
+export function runMigrationJobs(data) {
+  const idx = exec.scenario.iterationInTest;
+  if (idx >= JOB_QUEUE.length) {
+    return;
+  }
+  const item = JOB_QUEUE[idx];
+  const headers = authHeaders(data);
+  const enqueuedAtMs = Date.now();
+
+  // Respons 202 Accepted tidak dihitung sebagai sukses eksekusi migrasi;
+  // hanya status terminal 'success' dari pollJobUntilDone yang dihitung selesai.
+  const enqRes = http.post(`${BASE_URL}/api/v1/requests/${item.requestId}/enqueue`, null, {
+    headers,
+    tags: { endpoint: 'enqueue', scenario_type: item.scenarioType },
+  });
+  const accepted = check(enqRes, {
+    'POST /enqueue 202 Accepted': (r) => r.status === 202,
+  });
+  if (!accepted) {
+    jobsFailedTotal.add(1, { scenario_type: item.scenarioType });
+    jobSuccessRate.add(false, { scenario_type: item.scenarioType });
+    return;
+  }
+
+  const payload = enqRes.json();
+  if (payload && payload.job_id) {
+    pollJobUntilDone(payload.job_id, enqueuedAtMs, headers, item.scenarioType);
+  }
+}
+
+export function handleSummary(data) {
+  return {
+    stdout: textSummary(data, { indent: ' ', enableColors: false }),
+    'tests/k6/summary.json': JSON.stringify(data, null, 2),
+  };
+}

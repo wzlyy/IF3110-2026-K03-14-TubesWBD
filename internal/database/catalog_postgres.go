@@ -6,9 +6,14 @@ import (
 	"encoding/json"
 )
 
-const userSchemaPredicate = `n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'`
+type postgresTxQuerier interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
 
-func loadPostgresCatalog(ctx context.Context, tx *sql.Tx, dbName string) (*Catalog, error) {
+const userSchemaPredicate = `n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND n.nspname <> '_platform_meta'`
+
+func loadPostgresCatalog(ctx context.Context, tx postgresTxQuerier, dbName string) (*Catalog, error) {
 	// Force deparsed FK/index definitions to retain user schema qualifiers.
 	// This setting is local to the read-only catalog transaction.
 	if _, err := tx.ExecContext(ctx, "SET LOCAL search_path = pg_catalog"); err != nil {

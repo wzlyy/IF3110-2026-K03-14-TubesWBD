@@ -5,7 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
+
+	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/telemetry"
 )
 
 type contextKey string
@@ -25,13 +28,25 @@ type User struct {
 }
 
 // RequireAuth returns a middleware requiring a valid session.
-// Injects the User and Session into the request context.
+// Untuk route /api/* kembalikan JSON 401/403 alih-alih redirect HTML.
+// Menyisipkan User, Session, dan aktor telemetry ke dalam context request.
 func RequireAuth(db *sql.DB, secureCookie bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			isAPI := strings.HasPrefix(r.URL.Path, "/api/")
+			denyUnauth := func(msg string) {
+				if isAPI {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusUnauthorized)
+					_, _ = w.Write([]byte(`{"error":"` + msg + `"}`))
+					return
+				}
+				http.Redirect(w, r, "/login", http.StatusSeeOther)
+			}
+
 			cookie, err := r.Cookie(CookieSessionName)
 			if err != nil || cookie.Value == "" {
-				http.Redirect(w, r, "/login", http.StatusSeeOther)
+				denyUnauth("Authentication required")
 				return
 			}
 
@@ -39,7 +54,7 @@ func RequireAuth(db *sql.DB, secureCookie bool) func(http.Handler) http.Handler 
 			sess, wasPrevious, err := GetSession(ctx, db, cookie.Value)
 			if err != nil {
 				ClearSessionCookie(w, secureCookie)
-				http.Redirect(w, r, "/login", http.StatusSeeOther)
+				denyUnauth("Session invalid or expired")
 				return
 			}
 
@@ -55,6 +70,12 @@ func RequireAuth(db *sql.DB, secureCookie bool) func(http.Handler) http.Handler 
 						rotated, _, err = GetSession(ctx, db, sess.ID)
 					}
 					if err != nil {
+						if isAPI {
+							w.Header().Set("Content-Type", "application/json")
+							w.WriteHeader(http.StatusServiceUnavailable)
+							_, _ = w.Write([]byte(`{"error":"Session rotation unavailable. Please retry."}`))
+							return
+						}
 						http.Error(w, "Session rotation unavailable. Please retry.", http.StatusServiceUnavailable)
 						return
 					}
@@ -81,7 +102,13 @@ func RequireAuth(db *sql.DB, secureCookie bool) func(http.Handler) http.Handler 
 				if errors.Is(err, sql.ErrNoRows) {
 					_ = RevokeSession(ctx, db, sess.ID)
 					ClearSessionCookie(w, secureCookie)
-					http.Redirect(w, r, "/login", http.StatusSeeOther)
+					denyUnauth("Session user not found")
+					return
+				}
+				if isAPI {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte(`{"error":"Internal Server Error"}`))
 					return
 				}
 				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -92,17 +119,36 @@ func RequireAuth(db *sql.DB, secureCookie bool) func(http.Handler) http.Handler 
 			if !u.IsActive {
 				_ = RevokeAllUserSessions(ctx, db, u.ID)
 				ClearSessionCookie(w, secureCookie)
+				if isAPI {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = w.Write([]byte(`{"error":"Account disabled by administrator"}`))
+					return
+				}
 				http.Redirect(w, r, "/login?error=account_disabled", http.StatusSeeOther)
 				return
 			}
 
-			// Attach to context
+			// Sisipkan ke context termasuk aktor telemetry untuk log audit dan SQL
 			ctx = context.WithValue(ctx, userCtxKey, &u)
 			ctx = context.WithValue(ctx, sessionCtxKey, sess)
+			ctx = telemetry.WithActor(ctx, u.Username)
 
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// ContextWithAuth menyisipkan User dan Session ke context (untuk pemanggilan handler langsung saat testing).
+func ContextWithAuth(ctx context.Context, user *User, sess *Session) context.Context {
+	if user != nil {
+		ctx = context.WithValue(ctx, userCtxKey, user)
+		ctx = telemetry.WithActor(ctx, user.Username)
+	}
+	if sess != nil {
+		ctx = context.WithValue(ctx, sessionCtxKey, sess)
+	}
+	return ctx
 }
 
 // GetUserFromContext retrieves the authenticated User from context.

@@ -94,34 +94,63 @@ type HistoryResponse struct {
 
 // JobStatusView adalah respons untuk GET /api/v1/jobs/{job_id}.
 type JobStatusView struct {
-	JobID                 string                `json:"job_id"`
-	RequestID             string                `json:"request_id"`
-	DatabaseID            string                `json:"database_id"`
-	MigrationID           string                `json:"migration_id"`
-	ActionType            string                `json:"action_type"`
-	RequestStatus         string                `json:"request_status"`
-	Execution             *ExecutionRecord      `json:"execution,omitempty"`
-	BatchProgress         []BatchProgressRecord `json:"batch_progress"`
-	CanResumeBatch        bool                  `json:"can_resume_batch"`
-	CanRevertBatch        bool                  `json:"can_revert_batch"`
-	SubmittedAt           *time.Time            `json:"submitted_at,omitempty"`
-	ApprovedAt            *time.Time            `json:"approved_at,omitempty"`
-	UpdatedAt             time.Time             `json:"updated_at"`
+	JobID          string                `json:"job_id"`
+	RequestID      string                `json:"request_id"`
+	DatabaseID     string                `json:"database_id"`
+	MigrationID    string                `json:"migration_id"`
+	ActionType     string                `json:"action_type"`
+	RequestStatus  string                `json:"request_status"`
+	Execution      *ExecutionRecord      `json:"execution,omitempty"`
+	BatchProgress  []BatchProgressRecord `json:"batch_progress"`
+	CanResumeBatch bool                  `json:"can_resume_batch"`
+	CanRevertBatch bool                  `json:"can_revert_batch"`
+	SubmittedAt    *time.Time            `json:"submitted_at,omitempty"`
+	ApprovedAt     *time.Time            `json:"approved_at,omitempty"`
+	UpdatedAt      time.Time             `json:"updated_at"`
 }
 
 // ComputeHiddenRollbackIDs mencari pasangan (execution_id dibatalkan, rollback sukses) berdasarkan execution_id.
 // Rollback gagal dan percobaan apply gagal tidak pernah disembunyikan.
 func ComputeHiddenRollbackIDs(records []ExecutionRecord) map[string]struct{} {
-	hidden := make(map[string]struct{})
+	hidden, _ := rollbackEffects(records)
+	return hidden
+}
+
+// A continuation completes or undoes the original operation, even after several retries.
+func rollbackEffects(records []ExecutionRecord) (map[string]struct{}, map[string]bool) {
+	byID := make(map[string]ExecutionRecord, len(records))
 	for _, r := range records {
-		if (r.ActionType == ActionRollback || r.ActionType == ActionRevertBatch) &&
-			r.Status == ExecStatusSuccess &&
-			r.RevertedExecutionID != "" {
+		byID[r.ExecutionID] = r
+	}
+	hidden := make(map[string]struct{})
+	rolledBack := make(map[string]bool)
+	for _, r := range records {
+		if r.Status != ExecStatusSuccess {
+			continue
+		}
+		root := r
+		if r.ActionType == ActionResumeBatch || r.ActionType == ActionRevertBatch {
+			for root.ParentExecutionID != "" {
+				root = byID[root.ParentExecutionID]
+			}
+		}
+		var target string
+		switch {
+		case r.ActionType == ActionRevertBatch:
+			target = r.RevertedExecutionID
+			if root.ActionType != ActionRollback {
+				rolledBack[r.MigrationID] = true
+			}
+		case root.ActionType == ActionRollback:
+			target = root.RevertedExecutionID
+			rolledBack[r.MigrationID] = true
+		}
+		if target != "" {
 			hidden[r.ExecutionID] = struct{}{}
-			hidden[r.RevertedExecutionID] = struct{}{}
+			hidden[target] = struct{}{}
 		}
 	}
-	return hidden
+	return hidden, rolledBack
 }
 
 // FilterHistory menerapkan filter Hide rollback tanpa menghapus data riwayat.
@@ -147,18 +176,22 @@ func FilterHistory(records []ExecutionRecord, hideRollback bool) ([]ExecutionRec
 // ComputeActiveState menghitung tumpukan aktif, Active Tip LIFO, status rollback/gagal,
 // dan eksekusi pemblokir (partial/partially_reverted/uncertain) secara kronologis.
 func ComputeActiveState(records []ExecutionRecord) ActiveState {
-	hidden := ComputeHiddenRollbackIDs(records)
+	hidden, rolledBack := rollbackEffects(records)
 	state := ActiveState{
 		HiddenRollbackIDs:    hidden,
 		ActiveExecutions:     make([]ExecutionRecord, 0),
 		AppliedMigrationIDs:  make(map[string]bool),
-		RolledBackMigrations: make(map[string]bool),
+		RolledBackMigrations: rolledBack,
 		FailedMigrations:     make(map[string]bool),
 	}
 
 	// Lacak eksekusi partial yang sudah diselesaikan oleh resume_batch atau revert_batch sukses berikutnya.
 	resolvedPartialIDs := make(map[string]bool)
+	parents := make(map[string]string)
 	for _, r := range records {
+		if r.ParentExecutionID != "" {
+			parents[r.ExecutionID] = r.ParentExecutionID
+		}
 		if r.Status == ExecStatusSuccess {
 			if r.ActionType == ActionResumeBatch && r.ParentExecutionID != "" {
 				resolvedPartialIDs[r.ParentExecutionID] = true
@@ -171,6 +204,13 @@ func ComputeActiveState(records []ExecutionRecord) ActiveState {
 					resolvedPartialIDs[r.ParentExecutionID] = true
 				}
 			}
+		}
+	}
+	// A successful continuation resolves every partial ancestor, including
+	// earlier resume/revert attempts that themselves stopped partway through.
+	for id := range resolvedPartialIDs {
+		for parent := parents[id]; parent != "" && !resolvedPartialIDs[parent]; parent = parents[parent] {
+			resolvedPartialIDs[parent] = true
 		}
 	}
 
@@ -187,7 +227,6 @@ func ComputeActiveState(records []ExecutionRecord) ActiveState {
 			}
 		case ExecStatusSuccess:
 			if r.ActionType == ActionRollback || r.ActionType == ActionRevertBatch {
-				state.RolledBackMigrations[r.MigrationID] = true
 				continue
 			}
 			if r.ActionType == ActionUp || r.ActionType == ActionForward || r.ActionType == ActionResumeBatch {
@@ -405,9 +444,14 @@ func GetJobStatus(ctx context.Context, db *sql.DB, jobID string) (*JobStatusView
 			return nil, berr
 		}
 		view.BatchProgress = batches
-		if execRec.ExecutionMode == ModeBatch {
-			view.CanResumeBatch = execRec.Status == ExecStatusPartial
-			view.CanRevertBatch = !isIrreversible && (execRec.Status == ExecStatusPartial || execRec.Status == ExecStatusPartiallyReverted)
+		if execRec.ExecutionMode == ModeBatch && (execRec.Status == ExecStatusPartial || execRec.Status == ExecStatusPartiallyReverted) {
+			var held bool
+			err := db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM database_locks WHERE database_id=$1 AND execution_id=$2 AND hold_state='held_partial')", view.DatabaseID, execRec.ExecutionID).Scan(&held)
+			if err != nil {
+				return nil, err
+			}
+			view.CanResumeBatch = held && execRec.Status == ExecStatusPartial
+			view.CanRevertBatch = held && !isIrreversible
 		}
 	} else if err != nil && !errors.Is(err, ErrExecutionNotFound) {
 		return nil, err

@@ -136,7 +136,7 @@ func (s *WorkflowService) CreateRequest(ctx context.Context, databaseID, userID 
 		}
 	}
 
-	if err := s.validateRequestPreconditions(ctx, databaseID, def, in, state, lockInfo); err != nil {
+	if err := s.ValidateRequestPreconditions(ctx, databaseID, def, in, state, lockInfo); err != nil {
 		return nil, err
 	}
 
@@ -165,7 +165,7 @@ func (s *WorkflowService) CreateRequest(ctx context.Context, databaseID, userID 
 	return GetRequestDetail(ctx, s.DB, reqID)
 }
 
-func (s *WorkflowService) validateRequestPreconditions(
+func (s *WorkflowService) ValidateRequestPreconditions(
 	ctx context.Context,
 	databaseID string,
 	def *Definition,
@@ -176,6 +176,9 @@ func (s *WorkflowService) validateRequestPreconditions(
 	// 1. Periksa status pemblokir (partial, partially_reverted, atau uncertain).
 	if lockInfo != nil && lockInfo.HoldState == lock.StateHeldUncertain {
 		return ErrDatabaseBlocked
+	}
+	if (in.ActionType == ActionResumeBatch || in.ActionType == ActionRevertBatch) && state.BlockingExecution == nil {
+		return fmt.Errorf("%w: eksekusi partial sudah diselesaikan", ErrBatchActionInvalid)
 	}
 	if state.BlockingExecution != nil {
 		blocking := state.BlockingExecution
@@ -427,7 +430,24 @@ const requestColumns = `
 	r.action_type, COALESCE(r.target_execution_id, ''), r.status,
 	COALESCE(r.requested_by, ''), COALESCE(u.username, 'system'),
 	r.batch_size_override, COALESCE(r.job_id, ''),
-	CASE WHEN r.action_type IN ('rollback', 'revert_batch') THEN COALESCE(d.sql_down, '') ELSE d.sql_up END,
+	CASE
+		WHEN r.action_type IN ('resume_batch', 'revert_batch') THEN (
+			WITH RECURSIVE lineage AS (
+				SELECT e.execution_id, e.parent_execution_id, e.action_type, e.executed_sql_snapshot
+				FROM migration_executions e WHERE e.execution_id = r.target_execution_id
+				UNION ALL
+				SELECT e.execution_id, e.parent_execution_id, e.action_type, e.executed_sql_snapshot
+				FROM migration_executions e JOIN lineage l ON e.execution_id = l.parent_execution_id
+			)
+			SELECT CASE
+				WHEN r.action_type = 'resume_batch' THEN executed_sql_snapshot
+				WHEN action_type = 'rollback' THEN d.sql_up
+				ELSE COALESCE(d.sql_down, '')
+			END FROM lineage WHERE parent_execution_id IS NULL
+		)
+		WHEN r.action_type = 'rollback' THEN COALESCE(d.sql_down, '')
+		ELSE d.sql_up
+	END,
 	d.is_irreversible, r.created_at, r.submitted_at, r.approved_at, r.updated_at
 `
 

@@ -1,7 +1,6 @@
 services:
   platform-db:
     image: postgres:16-alpine
-    container_name: tubeswbd-platform-db
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${PLATFORM_DB_USER:-postgres}
@@ -20,7 +19,6 @@ services:
 
   target-postgres:
     image: postgres:16-alpine
-    container_name: tubeswbd-target-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${TARGET_PG_USER:-postgres}
@@ -38,7 +36,6 @@ services:
 
   target-postgres-2:
     image: postgres:16-alpine
-    container_name: tubeswbd-target-postgres-2
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${TARGET_PG2_USER:-postgres}
@@ -56,7 +53,6 @@ services:
 
   rabbitmq:
     image: rabbitmq:3-management-alpine
-    container_name: tubeswbd-rabbitmq
     restart: unless-stopped
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
@@ -74,7 +70,6 @@ services:
 
   target-mysql:
     image: mysql:8.0
-    container_name: tubeswbd-target-mysql
     restart: unless-stopped
     profiles: ["legacy-mysql"]
     environment:
@@ -95,15 +90,13 @@ services:
       context: .
       dockerfile: Dockerfile
       target: api
-    container_name: tubeswbd-backend-api
     restart: unless-stopped
-    profiles: ["app"]
-    environment:
-      PORT: ${PORT:-8080}
+    environment: &app-env
+      PORT: "8080"
       APP_ENV: ${APP_ENV:-development}
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-12345678901234567890123456789012}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set a private 32-byte ENCRYPTION_KEY in .env}
       ADMIN_INITIAL_USERNAME: ${ADMIN_INITIAL_USERNAME:-admin}
-      ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:-LocalDevAdmin!2026}
+      ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:?Set ADMIN_INITIAL_PASSWORD in .env}
       PLATFORM_DB_HOST: platform-db
       PLATFORM_DB_PORT: 5432
       PLATFORM_DB_USER: ${PLATFORM_DB_USER:-postgres}
@@ -113,11 +106,41 @@ services:
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672/
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-db-platform-api}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
-      SPA_DIST_DIR: ${SPA_DIST_DIR:-/app/frontend/dist}
+      SPA_DIST_DIR: /app/frontend/dist
+      TARGET_PG_HOST: target-postgres
+      TARGET_PG_PORT: 5432
+      TARGET_PG_USER: ${TARGET_PG_USER:-postgres}
+      TARGET_PG_PASSWORD: ${TARGET_PG_PASSWORD:-postgres}
+      TARGET_PG_NAME: ${TARGET_PG_NAME:-target_db}
+      TARGET_PG2_HOST: target-postgres-2
+      TARGET_PG2_PORT: 5432
+      TARGET_PG2_USER: ${TARGET_PG2_USER:-postgres}
+      TARGET_PG2_PASSWORD: ${TARGET_PG2_PASSWORD:-postgres}
+      TARGET_PG2_NAME: ${TARGET_PG2_NAME:-target_db_2}
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8080/api/v1/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     ports:
       - "${PORT:-8080}:8080"
     depends_on:
       platform-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      target: worker
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: db-platform-worker
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
+    depends_on:
+      backend-api:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy

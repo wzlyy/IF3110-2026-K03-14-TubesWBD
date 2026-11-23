@@ -285,3 +285,31 @@ func TestFailedAttemptDoesNotBlockAnotherMigrationForward(t *testing.T) {
 		t.Fatalf("failed mig-C should not be blocked by failed mig-B: %v", err)
 	}
 }
+func TestPartialRollbackContinuationHistory(t *testing.T) {
+	base := []ExecutionRecord{
+		{ExecutionID: "applied", MigrationID: "M", ActionType: ActionUp, Status: ExecStatusSuccess},
+		{ExecutionID: "rollback", MigrationID: "M", ActionType: ActionRollback, RevertedExecutionID: "applied", Status: ExecStatusPartial},
+		{ExecutionID: "retry", MigrationID: "M", ActionType: ActionResumeBatch, ParentExecutionID: "rollback", Status: ExecStatusPartial},
+	}
+	for _, action := range []string{ActionResumeBatch, ActionRevertBatch} {
+		t.Run(action, func(t *testing.T) {
+			done := ExecutionRecord{ExecutionID: "done", MigrationID: "M", ActionType: action, ParentExecutionID: "retry", Status: ExecStatusSuccess}
+			if action == ActionRevertBatch {
+				done.RevertedExecutionID = "retry"
+			}
+			history := append(base, done)
+			state := ComputeActiveState(history)
+			reverted := action == ActionRevertBatch
+			if state.BlockingExecution != nil || state.AppliedMigrationIDs["M"] != reverted || state.RolledBackMigrations["M"] == reverted {
+				t.Fatalf("unexpected state: %+v", state)
+			}
+			if reverted && (state.ActiveTip == nil || state.ActiveTip.ExecutionID != "applied") || !reverted && state.ActiveTip != nil {
+				t.Fatalf("unexpected active tip: %+v", state.ActiveTip)
+			}
+			visible, hidden := FilterHistory(history, true)
+			if hidden != 2 || len(visible) != 2 || (visible[0].ExecutionID == "applied") != reverted {
+				t.Fatalf("unexpected filtered history: %+v", visible)
+			}
+		})
+	}
+}

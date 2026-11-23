@@ -40,21 +40,21 @@ func (s *spyPublisher) PublishJob(_ context.Context, msg queue.JobMessage) error
 func (s *spyPublisher) Close() error { return nil }
 
 type m2TestEnv struct {
-	db              *sql.DB
-	mux             *http.ServeMux
-	store           *database.ConnectionStore
-	manager         *database.TargetManager
-	locks           *lock.Manager
-	pub             *spyPublisher
-	adminSess       *auth.Session
-	editorSess      *auth.Session
-	viewerSess      *auth.Session
-	leaderCoreSess  *auth.Session
-	leaderViewSess  *auth.Session
-	editorUserID    string
-	leaderCoreID    string
-	leaderViewID    string
-	db1ID           string
+	db             *sql.DB
+	mux            *http.ServeMux
+	store          *database.ConnectionStore
+	manager        *database.TargetManager
+	locks          *lock.Manager
+	pub            *spyPublisher
+	adminSess      *auth.Session
+	editorSess     *auth.Session
+	viewerSess     *auth.Session
+	leaderCoreSess *auth.Session
+	leaderViewSess *auth.Session
+	editorUserID   string
+	leaderCoreID   string
+	leaderViewID   string
+	db1ID          string
 }
 
 func setupM2IntegrationEnv(t *testing.T) *m2TestEnv {
@@ -385,6 +385,31 @@ func TestM2EndToEndWorkflowApprovalsHistoryAndAccessDenial(t *testing.T) {
 	if rec := env.doJSON(t, http.MethodGet, "/api/v1/jobs/"+enqRes.JobID, env.viewerSess, nil); rec.Code != http.StatusOK {
 		t.Fatalf("GET /jobs/{job_id} = %d: %s", rec.Code, rec.Body.String())
 	}
+
+	// A second continuation must preview the root attempt, even when the
+	// immediate parent stored a different snapshot.
+	root, retry := uuid.NewString(), uuid.NewString()
+	insertExec(root, "rollback", e4ID, "partial", "SELECT 42", 4*time.Second)
+	insertExec(retry, "resume_batch", "", "partial", "SELECT 99", 5*time.Second)
+	if _, err := env.db.ExecContext(ctx, "UPDATE migration_executions SET parent_execution_id=$1 WHERE execution_id=$2", root, retry); err != nil {
+		t.Fatal(err)
+	}
+	for action, want := range map[string]string{"resume_batch": "SELECT 42", "revert_batch": migA.SQLUp} {
+		id := uuid.NewString()
+		if _, err := env.db.ExecContext(ctx, `INSERT INTO migration_requests
+			(id,database_id,migration_id,action_type,target_execution_id) VALUES ($1,$2,$3,$4,$5)`,
+			id, env.db1ID, migA.ID, action, retry); err != nil {
+			t.Fatal(err)
+		}
+		detail, err := migration.GetRequestDetail(ctx, env.db, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if detail.SQLPreview != want {
+			t.Fatalf("%s preview = %q, want %q", action, detail.SQLPreview, want)
+		}
+	}
+
 }
 
 func TestM2AuthAdminExplorerBatchValidationAndRejectionIntegration(t *testing.T) {

@@ -1,0 +1,117 @@
+.m2 {
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.m2 header,
+.m2-panel {
+  margin-bottom: 1rem;
+}
+.m2-panel {
+  margin-top: 1rem;
+  border: 1px solid #cbd5df;
+  border-radius: 0.65rem;
+  padding: clamp(0.8rem, 2vw, 1.4rem);
+  background: white;
+  color: #192936;
+}
+.m2 fieldset {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+}
+.m2 label {
+  display: block;
+  margin: 0.65rem 0;
+}
+.m2 label :is(textarea, select, input:not([type="checkbox"])) {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0.25rem 0;
+  padding: 0.55rem;
+  border: 1px solid #a4b3c1;
+  border-radius: 0.4rem;
+}
+.m2 .m2-sql,
+.m2 pre {
+  font-family: Consolas, monospace;
+  overflow: auto;
+  max-width: 100%;
+}
+.m2 .m2-sql {
+  height: 8rem;
+  resize: vertical;
+}
+.m2 pre {
+  max-height: 16rem;
+  padding: 0.8rem;
+  white-space: pre;
+  background: #eff3f6;
+  color: #172e42;
+}
+.m2 .m2-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.m2 table {
+  border-collapse: collapse;
+  width: 100%;
+}
+.m2 td,
+.m2 th {
+  padding: 0.6rem;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid #d7dfe7;
+  min-width: 6rem;
+}
+.m2 small {
+  display: block;
+}
+.m2-actions,
+.m2-stages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: center;
+  margin: 0.65rem 0;
+}
+.m2-stages {
+  padding: 0;
+  list-style: none;
+}
+.m2-stages li {
+  padding: 0.2rem 0.45rem;
+  border-bottom: 2px solid #c6ced5;
+}
+.m2-stages [aria-current] {
+  border-color: #10695e;
+  font-weight: bold;
+}
+.m2 dialog {
+  width: min(40rem, 92vw);
+  box-sizing: border-box;
+  max-height: 85vh;
+  overflow: auto;
+  padding: 1.25rem;
+  border: 1px solid #a4b3c1;
+  border-radius: 0.6rem;
+}
+.m2 dialog::backdrop {
+  background: #10253599;
+}
+.m2-error {
+  color: #9d3026;
+}
+.m2-badge {
+  display: inline-block;
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+  background: #e0eee9;
+  color: #174d40;
+}
+.m2 progress {
+  width: 100%;
+  accent-color: #1c6c61;
+}

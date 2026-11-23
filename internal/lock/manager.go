@@ -220,10 +220,6 @@ func (m *Manager) AcquireForRecoveryOrResume(ctx context.Context, databaseID, wo
 	if n != 1 {
 		existing, gerr := m.GetLock(ctx, databaseID)
 		if gerr != nil {
-			if errors.Is(gerr, ErrLockNotFound) {
-				// Belum ada baris lock; ambil lock running baru.
-				return m.Acquire(ctx, databaseID, workerID, newExecutionID, ttl)
-			}
 			return nil, gerr
 		}
 		if existing.HoldState == StateHeldUncertain {

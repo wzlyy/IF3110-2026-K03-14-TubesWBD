@@ -1,0 +1,57 @@
+x-log-options: &log-options
+  fluentd-address: "127.0.0.1:24224"
+  fluentd-async: "true"
+
+services:
+  backend-api:
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4318
+    logging:
+      driver: fluentd
+      options:
+        <<: *log-options
+        tag: db-platform-api
+  worker:
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4318
+    logging:
+      driver: fluentd
+      options:
+        <<: *log-options
+        tag: db-platform-worker
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.123.0
+    command: ["--config=/etc/otel.yaml"]
+    volumes: ["./observability/otel-collector-config.yaml:/etc/otel.yaml:ro"]
+    ports: ["127.0.0.1:24224:24224"]
+    depends_on: [tempo, loki]
+  tempo:
+    image: grafana/tempo:2.7.2
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./observability/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo_data:/var/tempo
+  loki:
+    image: grafana/loki:3.4.3
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    volumes:
+      - ./observability/loki-config.yaml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+  prometheus:
+    image: prom/prometheus:v3.3.0
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+  grafana:
+    image: grafana/grafana:11.6.0
+    ports: ["127.0.0.1:${GRAFANA_PORT:-3000}:3000"]
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/platform-dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on: [loki, tempo, prometheus]
+volumes:
+  tempo_data:
+  loki_data:
+  prometheus_data:
+  grafana_data:

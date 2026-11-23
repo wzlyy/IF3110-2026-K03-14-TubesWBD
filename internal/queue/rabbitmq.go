@@ -53,6 +53,10 @@ func (c *RabbitMQClient) connect() error {
 		_ = conn.Close()
 		return err
 	}
+	if err := ch.Confirm(false); err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("enable publisher confirms: %w", err)
+	}
 	c.conn = conn
 	c.ch = ch
 	return nil
@@ -207,7 +211,17 @@ func (c *RabbitMQClient) publish(ctx context.Context, routingKey string, msg Job
 		return err
 	}
 
-	if err := ch.PublishWithContext(ctx, ExchangeName, routingKey, false, false, pub); err != nil {
+	confirmation, err := ch.PublishWithDeferredConfirmWithContext(ctx, ExchangeName, routingKey, false, false, pub)
+	if err == nil {
+		wait, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		var ack bool
+		ack, err = confirmation.WaitContext(wait)
+		if err == nil && !ack {
+			err = errors.New("broker rejected persistent message")
+		}
+	}
+	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("%w: publish failed: %v", ErrQueueUnavailable, err)

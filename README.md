@@ -96,23 +96,23 @@ Pada 500.000 baris, satu UPDATE membutuhkan **6,155 detik**. Worker batch revers
 
 Setelah seed, jalankan `.\tests\k6\setup_preapproved.ps1` (kuota bawaan kini 30 job per DB / 60 job total; dapat diubah lewat `-CountPerDB`). Terapkan nilai variabel lingkungan yang dicetak oleh skrip, lalu jalankan `k6 run --out json=k6-points.json tests/k6/stress_test.js`. Jika menggunakan password seed khusus, teruskan `-Password` ke skrip persiapan dan set `K6_PASSWORD` sebelum k6. Gunakan database pengujian karena request yang disiapkan akan benar-benar dieksekusi. Skrip `tests/k6/stress_test.js` kini menyebarkan pengiriman job ke lima tahap beban (`baseline_10vu`, `ramp_30vu`, `ramp_60vu`, `peak_100vu`, `recovery_10vu`) beserta tag `load_stage` (atau `K6_JOB_MODE=burst` untuk pengiriman serentak di awal).
 
-Pada run pengukuran 23 November 2026 (memakai 40 job pra-persetujuan yang diluncurkan di awal), skenario baca menaikkan beban sampai 100 virtual user (VU), lalu menurunkannya, sementara skenario kedua mengirim 40 job ke dua database dan melakukan polling hingga status terminal. Threshold global p95 HTTP <500 ms dan error rate <2% tercapai pada run ini (p95 **71,39 ms**, **0%** gagal). Seluruh 40 job mencapai success, dengan p95 antre **4,175 detik** dan p95 enqueue hingga hasil teramati **4,308 detik**.
+Pada run pengukuran 25 November 2026 menggunakan mode bertahap (`K6_JOB_MODE=staged`, 60 job pra-persetujuan tersebar ke lima tahap beban pada dua target PostgreSQL), skenario baca menaikkan beban dari `0 → 10 → 30 → 60 → 100 VU` lalu menurunkannya kembali ke `10 → 0 VU`, sementara skenario kedua mengirim `30` job `same_db` (`target-postgres-1`) dan `30` job `diff_db` (`target-postgres-2`) lalu mem-polling status hingga terminal. Seluruh threshold k6 lulus: **`p95` HTTP 28,08 ms** (`< 500 ms`), **error rate HTTP 0,00%** (`0 / 35.455`, `< 2%`), throughput agregat **207,95 req/s**, dan **60 / 60 job sukses (`100%`)** dengan `queue_wait` `p50 = 18 ms` / `p95 = 34,25 ms` serta durasi penyelesaian job `p50 = 279,5 ms` / `p95 = 304,2 ms`.
 
-| Tahap yang dijadwalkan | Hasil dan interpretasi per jendela pengamatan |
-|---|---|
-| Baseline menuju 10 VU | 45,30 req/s, p95 22,36 ms. Seluruh 40 job pada run awal selesai pada jendela ini, setara 1,33 job/s. Ada selisih besar antara median antre 28 ms dan p95 4.175 ms karena pengiriman serentak ke dua target. |
-| Naik menuju 30 VU | 147,10 req/s dengan p95 23,68 ms. Trafik baca naik dan latensi ekor dekat dengan baseline. |
-| Naik menuju 60 VU | 320,33 req/s dengan p95 22,44 ms. Throughput terus naik tanpa kegagalan HTTP. |
-| Puncak menuju 100 VU | 371,00 req/s, p95 98,46 ms. Tambahan throughput mulai melambat, sementara p95 melonjak lebih dari empat kali jendela sebelumnya akibat mulai terbentuknya antrean koneksi. |
-| Turun menuju 10 VU | 13,07 req/s, p95 **29,26 detik**. Fase ini melampaui ambang 500 ms meskipun threshold agregat lulus, dengan p95 `http_req_sending` k6 sebesar 27,80 detik dan durasi maksimum 30,102 detik (0% error). |
-| Pemulihan menuju 0 VU | Pada sampel akhir p95 turun ke 17,82 ms, dengan 105 respons dan 0 kegagalan. |
+| Jendela waktu (tahap beban) | HTTP selesai (req/s) | HTTP p50 / p95 (ms) | Error | Job selesai (job/s) | Queue wait p50 / p95 (ms) | Durasi job p50 / p95 (ms) |
+|---|---:|---:|---:|---:|---:|---:|
+| `0–30s` (`0 → 10 VU` / `baseline_10vu`) | 999 (33,30) | 6,53 / 20,47 | 0% | 10 (0,333) | 19,0 / 30,65 | 277,0 / 285,55 |
+| `30–60s` (`10 → 30 VU` / `ramp_30vu`) | 3.738 (124,60) | 6,12 / 26,10 | 0% | 12 (0,400) | 18,0 / 30,20 | 282,0 / 305,80 |
+| `60–90s` (`30 → 60 VU` / `ramp_60vu`) | 7.949 (264,97) | 5,24 / 39,36 | 0% | 15 (0,500) | 17,0 / 36,50 | 280,0 / 303,90 |
+| `90–120s` (`60 → 100 VU` / `peak_100vu`) | 14.165 (472,17) | 5,24 / 27,70 | 0% | 15 (0,500) | 18,0 / 34,05 | 282,0 / 301,50 |
+| `120–150s` (`100 → 10 VU` / `recovery_10vu`) | 8.131 (271,03) | 4,49 / 22,31 | 0% | 8 (0,267) | 18,5 / 23,30 | 277,0 / 287,30 |
+| `150s–akhir` (17,44s, `10 → 0 VU`) | 472 (27,07) | 3,83 / 14,45 | 0% | 0 (0,000) | — | — |
 
-**Analisis penyebab lonjakan `p95` pada transisi beban puncak ke *ramp-down* (`120–150s`):**
-1. **Antrean pool koneksi database target (`SetMaxOpenConns(5)`):** Di `internal/database/target_manager.go`, setiap pool target PostgreSQL dibatasi maksimal 5 koneksi aktif (`SetMaxOpenConns(5)`). Saat 100 VU secara serentak memanggil `GET /api/v1/databases/{id}/schema` pada dua target (~50 VU per target, rasio kontensi 10:1), setiap `LoadCatalog` menahan 1 koneksi dalam transaksi `REPEATABLE READ READ ONLY` selama 6 kueri katalog berurutan ditambah pencatatan log/span OTel, serta bersaing dengan kueri sesi/grant/riwayat di pool Platform DB (`SetMaxOpenConns(25)`).
-2. **Backpressure soket TCP & batas waktu server:** Antrean koneksi pada API menyebabkan *backpressure* pengiriman request (`http_req_sending` p95 27,80 detik) dan menahan respons ekor mendekati `WriteTimeout: 30s` pada `http.Server` (`cmd/server/main.go`) tanpa memicu kegagalan HTTP.
-3. **Efek pengelompokan berdasarkan waktu selesai (*completion-time bucketing*):** Time-series k6 mencatat setiap sampel pada jendela saat respons *selesai*. Request ekor yang tertahan di puncak `90–120s` baru selesai di jendela `120–150s`, ketika jumlah VU sudah turun ke 10 sehingga total respons per jendela turun dari 11.130 menjadi hanya 392 sampel; sekitar ~20–30 respons ekor dari fase puncak sudah menggeser nilai persentil ke-95 ke **29,26 detik** sebelum kembali pulih ke **17,82 ms** pada jendela pendinginan.
+**Analisis perilaku tiap tingkat beban & pemulihan:**
+1. **Baseline & Ramp-up Awal (`0–60s`, `10 → 30 VU`):** Latensi HTTP sangat stabil (`p50 ~6,1–6,5 ms`, `p95 ~20,5–26,1 ms`) seiring peningkatan throughput hingga `124,60 req/s`, dengan waktu tunggu antrean job `~18–19 ms`.
+2. **Beban Menengah–Puncak (`60–120s`, `30 → 100 VU`):** Pada transisi `60–90s`, terjadi lonjakan maksimum sesaat (`654,25 ms`, `p95 = 39,36 ms`) akibat antrean sementara pada pool target `SetMaxOpenConns(5)` ([`internal/database/target_manager.go`](internal/database/target_manager.go#L139)) ketika `GET /schema` menahan transaksi katalog `REPEATABLE READ` bersamaan dengan eksekusi migrasi. Pada puncak `90–120s`, throughput mencapai **`472,17 req/s`** (`14.165` request) dengan `p95` HTTP `27,70 ms`, `0%` error, dan `15` job tetap selesai lancar.
+3. **Pemulihan (`120s–akhir`, `100 → 0 VU`) & Perbandingan DB:** Sistem langsung pulih tanpa *tail latency* tertahan: `p95` HTTP turun ke `22,31 ms` (`120–150s`) lalu `14,45 ms` (`150s–akhir`), dengan seluruh 8 job sisa tuntas dan gauge inflight kembali ke `0`. Di sisi antrean, job `same_db` mencatat ekor `queue_wait` lebih tinggi (`p95 = 41,75 ms`, `max = 49 ms`) dibanding `diff_db` (`p95 = 24,10 ms`, `max = 26 ms`) karena serialisasi distributed lock pada database target yang sama.
 
-[Rekap sampel k6, analisis detail, dan pembaruan skenario bertahap](docs/k6-raw-results.md)
+[Rekap lengkap metrik, per tahap `load_stage`, perbandingan `same_db` vs `diff_db`, dan analisis](docs/k6-raw-results.md)
 
 ### Observabilitas dan CodeQL
 

@@ -4,7 +4,7 @@ param(
     [string]$LeaderCoreUser = "leader_core",
     [string]$LeaderAnalyticsUser = "leader_analytics",
     [string]$Password = "DevPass!2026",
-    [int]$CountPerDB = 20
+    [int]$CountPerDB = 30
 )
 
 $ErrorActionPreference = 'Stop'

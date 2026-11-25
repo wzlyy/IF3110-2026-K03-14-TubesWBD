@@ -20,6 +20,36 @@ const DB2_ID = __ENV.K6_DB2_ID || '';
 const SAME_DB_REQUEST_IDS = (__ENV.K6_SAME_DB_REQUEST_IDS || '').split(',').filter(Boolean);
 const DIFF_DB_REQUEST_IDS = (__ENV.K6_DIFF_DB_REQUEST_IDS || '').split(',').filter(Boolean);
 const POLL_TIMEOUT_SEC = parseInt(__ENV.K6_POLL_TIMEOUT_SEC || '90', 10);
+const JOB_MODE = __ENV.K6_JOB_MODE || 'staged';
+
+// Bagi seluruh job secara proporsional ke lima tahap beban agar fase baseline,
+// ramp-up, puncak 100 VU, dan ramp-down pemulihan sama-sama terukur oleh metrik k6.
+const JOB_STAGE_WINDOWS = [
+  { name: 'baseline_10vu', startMs: 5000, endMs: 28000, weight: 0.15 },
+  { name: 'ramp_30vu', startMs: 30000, endMs: 58000, weight: 0.20 },
+  { name: 'ramp_60vu', startMs: 60000, endMs: 88000, weight: 0.25 },
+  { name: 'peak_100vu', startMs: 90000, endMs: 118000, weight: 0.25 },
+  { name: 'recovery_10vu', startMs: 120000, endMs: 148000, weight: 0.15 },
+];
+
+function scheduledJobWindow(idx, total) {
+  if (JOB_MODE === 'burst' || total <= 1) {
+    return { offsetMs: 15000, stage: 'baseline_10vu' };
+  }
+  const progress = (idx + 0.5) / total;
+  let cumulative = 0;
+  for (let i = 0; i < JOB_STAGE_WINDOWS.length; i++) {
+    const win = JOB_STAGE_WINDOWS[i];
+    const prev = cumulative;
+    cumulative += win.weight;
+    if (progress <= cumulative || i === JOB_STAGE_WINDOWS.length - 1) {
+      const localProgress = Math.min(1, Math.max(0, (progress - prev) / win.weight));
+      const offsetMs = Math.round(win.startMs + localProgress * (win.endMs - win.startMs));
+      return { offsetMs, stage: win.name };
+    }
+  }
+  return { offsetMs: 15000, stage: 'baseline_10vu' };
+}
 
 // Selang-selingkan request DB sama dan DB berbeda agar tiap request di-enqueue sekali saja
 // sehingga terhindar dari konflik 409 sambil menguji kontensi lock dan paralelisme.
@@ -52,15 +82,15 @@ const scenarios = {
 };
 
 if (JOB_QUEUE.length > 0) {
-  // Skenario 2: Enqueue job migrasi pra-persetujuan secara bersamaan lalu polling hingga selesai
+  // Skenario 2: Sebar pengiriman job migrasi pra-persetujuan ke lima tahap beban lalu polling hingga selesai.
   // Memakai shared-iterations agar setiap request_id diambil unik lewat iterationInTest.
   scenarios.migration_job_stress = {
     executor: 'shared-iterations',
     exec: 'runMigrationJobs',
-    vus: Math.min(10, JOB_QUEUE.length),
+    vus: Math.min(20, JOB_QUEUE.length),
     iterations: JOB_QUEUE.length,
-    maxDuration: '3m',
-    startTime: '15s',
+    maxDuration: '4m',
+    startTime: '0s',
   };
 }
 
@@ -87,6 +117,7 @@ export function setup() {
   return {
     csrfToken: body ? body.csrf_token : '',
     sessionCookie: cookie,
+    startedAtMs: Date.now(),
   };
 }
 
@@ -98,14 +129,15 @@ function authHeaders(data) {
   };
 }
 
-function pollJobUntilDone(jobID, enqueuedAtMs, headers, scenarioTag) {
+function pollJobUntilDone(jobID, enqueuedAtMs, headers, scenarioTag, stageTag) {
   const deadline = Date.now() + POLL_TIMEOUT_SEC * 1000;
   let recordedQueueWait = false;
+  const metricTags = { scenario_type: scenarioTag, load_stage: stageTag };
 
   while (Date.now() < deadline) {
     const res = http.get(`${BASE_URL}/api/v1/jobs/${jobID}`, {
       headers,
-      tags: { endpoint: 'job_status', scenario_type: scenarioTag },
+      tags: { endpoint: 'job_status', scenario_type: scenarioTag, load_stage: stageTag },
     });
     if (res.status !== 200) {
       sleep(0.5);
@@ -117,28 +149,28 @@ function pollJobUntilDone(jobID, enqueuedAtMs, headers, scenarioTag) {
     if (!recordedQueueWait && view.execution && view.execution.started_at) {
       const startedMs = Date.parse(view.execution.started_at);
       if (!isNaN(startedMs) && startedMs >= enqueuedAtMs) {
-        queueWaitMS.add(startedMs - enqueuedAtMs, { scenario_type: scenarioTag });
+        queueWaitMS.add(startedMs - enqueuedAtMs, metricTags);
         recordedQueueWait = true;
       }
     }
 
     if (status === 'success') {
-      jobCompletionDurationMS.add(Date.now() - enqueuedAtMs, { scenario_type: scenarioTag });
-      jobsCompletedTotal.add(1, { scenario_type: scenarioTag });
-      jobSuccessRate.add(true, { scenario_type: scenarioTag });
+      jobCompletionDurationMS.add(Date.now() - enqueuedAtMs, metricTags);
+      jobsCompletedTotal.add(1, metricTags);
+      jobSuccessRate.add(true, metricTags);
       return true;
     }
     if (status === 'failed' || status === 'partial' || status === 'uncertain') {
-      jobCompletionDurationMS.add(Date.now() - enqueuedAtMs, { scenario_type: scenarioTag });
-      jobsFailedTotal.add(1, { scenario_type: scenarioTag });
-      jobSuccessRate.add(false, { scenario_type: scenarioTag });
+      jobCompletionDurationMS.add(Date.now() - enqueuedAtMs, metricTags);
+      jobsFailedTotal.add(1, metricTags);
+      jobSuccessRate.add(false, metricTags);
       return false;
     }
     sleep(0.25);
   }
 
-  jobsFailedTotal.add(1, { scenario_type: scenarioTag });
-  jobSuccessRate.add(false, { scenario_type: scenarioTag });
+  jobsFailedTotal.add(1, metricTags);
+  jobSuccessRate.add(false, metricTags);
   return false;
 }
 
@@ -175,27 +207,36 @@ export function runMigrationJobs(data) {
     return;
   }
   const item = JOB_QUEUE[idx];
+  const { offsetMs, stage } = scheduledJobWindow(idx, JOB_QUEUE.length);
+  if (data.startedAtMs) {
+    const waitMs = data.startedAtMs + offsetMs - Date.now();
+    if (waitMs > 0) {
+      sleep(waitMs / 1000);
+    }
+  }
+
   const headers = authHeaders(data);
   const enqueuedAtMs = Date.now();
+  const metricTags = { scenario_type: item.scenarioType, load_stage: stage };
 
   // Respons 202 Accepted tidak dihitung sebagai sukses eksekusi migrasi;
   // hanya status terminal 'success' dari pollJobUntilDone yang dihitung selesai.
   const enqRes = http.post(`${BASE_URL}/api/v1/requests/${item.requestId}/enqueue`, null, {
     headers,
-    tags: { endpoint: 'enqueue', scenario_type: item.scenarioType },
+    tags: { endpoint: 'enqueue', scenario_type: item.scenarioType, load_stage: stage },
   });
   const accepted = check(enqRes, {
     'POST /enqueue 202 Accepted': (r) => r.status === 202,
   });
   if (!accepted) {
-    jobsFailedTotal.add(1, { scenario_type: item.scenarioType });
-    jobSuccessRate.add(false, { scenario_type: item.scenarioType });
+    jobsFailedTotal.add(1, metricTags);
+    jobSuccessRate.add(false, metricTags);
     return;
   }
 
   const payload = enqRes.json();
   if (payload && payload.job_id) {
-    pollJobUntilDone(payload.job_id, enqueuedAtMs, headers, item.scenarioType);
+    pollJobUntilDone(payload.job_id, enqueuedAtMs, headers, item.scenarioType, stage);
   }
 }
 

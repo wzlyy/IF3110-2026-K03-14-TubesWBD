@@ -230,6 +230,9 @@ func TestMetricsExposeRequiredLowCardinalityMetrics(t *testing.T) {
 	m.RegisterDBPool("platform", func() sql.DBStats {
 		return sql.DBStats{InUse: 3, Idle: 7, WaitCount: 2, WaitDuration: 150 * time.Millisecond}
 	})
+	m.RegisterDBPool("target_postgres", func() sql.DBStats {
+		return sql.DBStats{InUse: 1, Idle: 2, WaitCount: 0, WaitDuration: 0}
+	})
 	m.RecordJobEnqueued("up", "batch")
 	m.RecordJobStarted("up", "batch", 250*time.Millisecond)
 	m.ObserveLockWait(40 * time.Millisecond)
@@ -279,6 +282,13 @@ func TestMetricsExposeRequiredLowCardinalityMetrics(t *testing.T) {
 					t.Errorf("metric %q uses forbidden high-cardinality label %q", name, lp.GetName())
 				}
 			}
+		}
+	}
+
+	bodyText := rec.Body.String()
+	for _, wantRole := range []string{`db_role="platform"`, `db_role="target_postgres"`} {
+		if !strings.Contains(bodyText, wantRole) {
+			t.Errorf("expected Prometheus pool label %s in /metrics output:\n%s", wantRole, bodyText)
 		}
 	}
 }

@@ -18,11 +18,11 @@ export function Queue() {
   );
   return (
     <section className="m2">
-      <h1>Review queue</h1>
-      {db && <Link to={dbPath(db) + "/migrations"}>Migration definitions</Link>}
+      <h1>Antrean tinjauan</h1>
+      {db && <Link to={dbPath(db) + "/migrations"}>Definisi migrasi</Link>}
       <Feedback error={error} />
-      {!data && !error && <p>Loading requests…</p>}
-      {data && !data.requests?.length && <p>No change requests.</p>}
+      {!data && !error && <p>Memuat daftar permintaan…</p>}
+      {data && !data.requests?.length && <p>Belum ada permintaan perubahan.</p>}
       {data?.requests?.map((r) => (
         <article key={r.id} className="m2-panel">
           <h2>
@@ -32,7 +32,7 @@ export function Queue() {
             {r.database_name} · v{r.migration_version} · {r.action_type} ·{" "}
             <strong>{r.status}</strong>
           </p>
-          <p>Requested by {r.requested_by_username}</p>
+          <p>Diajukan oleh {r.requested_by_username}</p>
         </article>
       ))}
     </section>
@@ -76,8 +76,8 @@ export function Review() {
   }
   return (
     <section className="m2">
-      <Link to="/requests">Review queue</Link>
-      <h1>{r?.migration_name ?? "Change request"}</h1>
+      <Link to="/requests">Antrean tinjauan</Link>
+      <h1>{r?.migration_name ?? "Permintaan perubahan"}</h1>
       <Feedback error={error || defs.error || action.error} />
       {r && (
         <>
@@ -86,24 +86,24 @@ export function Review() {
               {r.action_type} · {r.status}
             </h2>
             <p>
-              {r.database_name} · Requested by {r.requested_by_username}
+              {r.database_name} · Diajukan oleh {r.requested_by_username}
             </p>
             {r.target_execution_id && (
               <p>
-                Target execution <code>{r.target_execution_id}</code>
+                Eksekusi sasaran <code>{r.target_execution_id}</code>
               </p>
             )}
-            <h3>SQL preview</h3>
+            <h3>Pratinjau SQL</h3>
             <pre>{r.sql_preview}</pre>
           </article>
           <article className="m2-panel">
-            <h2>Group approvals</h2>
+            <h2>Persetujuan grup</h2>
             {r.approvals?.length ? (
               <div className="m2-scroll">
                 <table>
                   <thead>
                     <tr>
-                      {["Group", "Access", "Leader", "Decision", "Comment"].map(
+                      {["Grup", "Hak akses", "Leader", "Keputusan", "Komentar"].map(
                         (h) => (
                           <th key={h}>{h}</th>
                         ),
@@ -124,11 +124,11 @@ export function Review() {
                 </table>
               </div>
             ) : (
-              <p>No group decisions recorded.</p>
+              <p>Belum ada keputusan grup yang tercatat.</p>
             )}
             {canDecide && (
               <label>
-                Review comment
+                Komentar tinjauan
                 <textarea
                   value={comment}
                   onChange={(e) => setComment(e.target.value)}
@@ -138,7 +138,7 @@ export function Review() {
             <div className="m2-actions">
               {r.status === "draft" && canEdit && (
                 <button disabled={action.busy} onClick={() => submit("submit")}>
-                  Submit review
+                  Ajukan tinjauan
                 </button>
               )}
               {canDecide && (
@@ -147,13 +147,13 @@ export function Review() {
                     disabled={action.busy}
                     onClick={() => submit("approve")}
                   >
-                    Approve
+                    Setujui
                   </button>
                   <button
                     disabled={action.busy}
                     onClick={() => submit("reject")}
                   >
-                    Reject
+                    Tolak
                   </button>
                 </>
               )}
@@ -162,12 +162,12 @@ export function Review() {
                   disabled={action.busy}
                   onClick={() => submit("enqueue")}
                 >
-                  Enqueue execution
+                  Masukkan ke antrean eksekusi
                 </button>
               )}
-              {r.job_id && <Link to={"/jobs/" + r.job_id}>Monitor job</Link>}
+              {r.job_id && <Link to={"/jobs/" + r.job_id}>Pantau job</Link>}
               <button disabled={action.busy} onClick={refresh}>
-                Refresh status
+                Segarkan status
               </button>
             </div>
           </article>

@@ -19,11 +19,11 @@ function Snapshot({ record, close }: { record: Execution; close: () => void }) {
   }, []);
   return (
     <dialog ref={ref} onCancel={close} aria-labelledby="snapshot-title">
-      <h2 id="snapshot-title">Executed SQL snapshot</h2>
+      <h2 id="snapshot-title">Snapshot SQL yang dieksekusi</h2>
       <p>{record.execution_id}</p>
       <pre>{record.executed_sql_snapshot}</pre>
       <button autoFocus onClick={close}>
-        Close
+        Tutup
       </button>
     </dialog>
   );
@@ -50,8 +50,8 @@ export default function History() {
     ) ?? [];
   return (
     <section className="m2">
-      <h1>Execution history</h1>
-      <Link to={base + "/migrations"}>Migration definitions</Link>
+      <h1>Riwayat eksekusi</h1>
+      <Link to={base + "/migrations"}>Definisi migrasi</Link>
       <div className="m2-panel">
         <label>
           <input
@@ -59,12 +59,12 @@ export default function History() {
             checked={hide}
             onChange={(e) => setHide(e.target.checked)}
           />{" "}
-          Hide rollback
+          Sembunyikan rollback (Hide rollback)
         </label>
         {history.data && (
           <p>
-            {history.data.total_attempts} attempts · {history.data.hidden_count}{" "}
-            hidden
+            {history.data.total_attempts} percobaan ·{" "}
+            {history.data.hidden_count} disembunyikan
           </p>
         )}
         {s?.access_level === "VIEW_EDIT" &&
@@ -74,30 +74,30 @@ export default function History() {
               disabled={action.busy}
               onClick={() => void action.run(() => create(db, d.id, "forward"))}
             >
-              Request forward · {d.name}
+              Ajukan forward · {d.name}
             </button>
           ))}
       </div>
       <Feedback error={history.error || defs.error || action.error} />
-      {!history.data && !history.error && <p>Loading history…</p>}
+      {!history.data && !history.error && <p>Memuat riwayat eksekusi…</p>}
       {history.data && (
         <div
           className="m2-scroll"
           tabIndex={0}
-          aria-label="Execution history table"
+          aria-label="Tabel riwayat eksekusi"
         >
           <table>
             <thead>
               <tr>
                 {[
-                  "Migration",
-                  "Execution",
-                  "Action",
-                  "Executed by",
-                  "Started",
+                  "Migrasi",
+                  "ID Eksekusi",
+                  "Aksi",
+                  "Dieksekusi oleh",
+                  "Waktu mulai",
                   "Status",
-                  "Committed batches / rows",
-                  "Actions",
+                  "Batch / baris terkomit",
+                  "Tindakan",
                 ].map((label) => (
                   <th key={label}>{label}</th>
                 ))}
@@ -121,8 +121,8 @@ export default function History() {
                   </td>
                   <td>
                     <div className="m2-actions">
-                      <button onClick={() => setSnapshot(e)}>View SQL</button>
-                      <Link to={"/jobs/" + e.job_id}>Job</Link>
+                      <button onClick={() => setSnapshot(e)}>Lihat SQL</button>
+                      <Link to={"/jobs/" + e.job_id}>Detail job</Link>
                       {s?.access_level === "VIEW_EDIT" &&
                         !s.blocking_execution &&
                         s.active_tip?.execution_id === e.execution_id &&
@@ -142,7 +142,7 @@ export default function History() {
                               )
                             }
                           >
-                            Request rollback
+                            Ajukan rollback
                           </button>
                         )}
                     </div>
@@ -151,7 +151,9 @@ export default function History() {
               ))}
             </tbody>
           </table>
-          {!history.data.executions?.length && <p>No executions to show.</p>}
+          {!history.data.executions?.length && (
+            <p>Belum ada riwayat eksekusi untuk ditampilkan.</p>
+          )}
         </div>
       )}
       {snapshot && (

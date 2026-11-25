@@ -76,10 +76,10 @@ function Editor({
         });
       }}
     >
-      <h2>{definition ? "Edit draft" : "New migration"}</h2>
+      <h2>{definition ? "Ubah draf" : "Migrasi baru"}</h2>
       <fieldset disabled={busy}>
         <label>
-          Name
+          Nama
           <input
             required
             value={draft.name}
@@ -87,7 +87,7 @@ function Editor({
           />
         </label>
         <label>
-          Description
+          Deskripsi
           <textarea
             value={draft.description}
             onChange={(e) => set("description", e.target.value)}
@@ -109,11 +109,11 @@ function Editor({
             checked={draft.is_irreversible}
             onChange={(e) => set("is_irreversible", e.target.checked)}
           />{" "}
-          Irreversible
+          Irreversible (tidak dapat di-rollback)
         </label>
         {draft.is_irreversible ? (
           <label>
-            Irreversible reason
+            Alasan irreversible
             <input
               required
               value={draft.irreversible_reason}
@@ -133,7 +133,7 @@ function Editor({
           </label>
         )}
         <label>
-          Execution mode
+          Mode eksekusi
           <select
             value={draft.execution_mode}
             onChange={(e) => set("execution_mode", e.target.value)}
@@ -145,7 +145,7 @@ function Editor({
         {draft.execution_mode === "batch" && (
           <>
             <label>
-              Batch table
+              Tabel batch
               <input
                 required
                 value={draft.batch_table}
@@ -153,7 +153,7 @@ function Editor({
               />
             </label>
             <label>
-              Batch cursor column
+              Kolom cursor batch
               <input
                 required
                 value={draft.batch_cursor_column}
@@ -161,7 +161,7 @@ function Editor({
               />
             </label>
             <label>
-              Batch size
+              Ukuran batch
               <input
                 type="number"
                 required
@@ -175,7 +175,10 @@ function Editor({
                 }
               />
             </label>
-            <p>Use $1 and $2 as the inclusive cursor bounds in batch SQL.</p>
+            <p>
+              Gunakan satu statement UPDATE tanpa WHERE atau dengan klausa WHERE{" "}
+              {"<cursor>"} BETWEEN $1 AND $2 sebagai batas inklusif.
+            </p>
           </>
         )}
         <div className="m2-actions">
@@ -191,11 +194,11 @@ function Editor({
               })
             }
           >
-            Validate SQL / Dry-run
+            Validasi SQL / Dry-run
           </button>
-          <button>Save draft</button>
+          <button>Simpan draf</button>
           <button type="button" onClick={cancel}>
-            Cancel
+            Batal
           </button>
         </div>
       </fieldset>
@@ -221,11 +224,11 @@ export default function MigrationPage() {
   return (
     <section className="m2">
       <header>
-        <h1>Migration definitions</h1>
+        <h1>Definisi migrasi</h1>
         <div className="m2-actions">
-          <Link to={dbPath(db) + "/history"}>Execution history</Link>
+          <Link to={dbPath(db) + "/history"}>Riwayat eksekusi</Link>
           <Link to={"/requests?database_id=" + encodeURIComponent(db)}>
-            Review queue
+            Antrean tinjauan
           </Link>
           {data?.access_level === "VIEW_EDIT" && (
             <button
@@ -234,7 +237,7 @@ export default function MigrationPage() {
                 setEditing("new");
               }}
             >
-              New migration
+              Migrasi baru
             </button>
           )}
         </div>
@@ -253,27 +256,29 @@ export default function MigrationPage() {
           cancel={() => setEditing(null)}
         />
       )}
-      {!data && !error && <p>Loading definitions…</p>}
-      {data && !(data.definitions ?? []).length && <p>No migrations yet.</p>}
+      {!data && !error && <p>Memuat definisi migrasi…</p>}
+      {data && !(data.definitions ?? []).length && (
+        <p>Belum ada definisi migrasi.</p>
+      )}
       {data?.definitions?.map((d) => (
         <article key={d.id} className="m2-panel">
           <h2>{d.name}</h2>
           <p>
-            v{d.version} · Revision {d.revision} · {d.execution_mode}{" "}
+            v{d.version} · Revisi {d.revision} · {d.execution_mode}{" "}
             {d.is_immutable && (
-              <strong className="m2-badge">Immutable (locked)</strong>
+              <strong className="m2-badge">Immutable (terkunci)</strong>
             )}
           </p>
           <p>{d.description}</p>
           <details>
-            <summary>SQL definition</summary>
+            <summary>Definisi SQL</summary>
             <pre>{d.sql_up}</pre>
             <pre>{d.sql_down || d.irreversible_reason}</pre>
           </details>
           {data.access_level === "VIEW_EDIT" && (
             <div className="m2-actions">
               {!d.is_immutable && (
-                <button onClick={() => setEditing(d)}>Edit draft</button>
+                <button onClick={() => setEditing(d)}>Ubah draf</button>
               )}
               <button
                 disabled={
@@ -283,7 +288,7 @@ export default function MigrationPage() {
                 }
                 onClick={() => void action.run(() => create(db, d.id, "up"))}
               >
-                Request up
+                Ajukan up
               </button>
             </div>
           )}

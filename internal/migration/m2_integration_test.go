@@ -486,11 +486,11 @@ func TestM2AuthAdminExplorerBatchValidationAndRejectionIntegration(t *testing.T)
 		t.Fatalf("POST /explain = %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// 4. Validasi definisi batch: kolom cursor non-unik -> 422; kolom cursor PK -> 201.
+	// 4. Validasi definisi batch: kolom cursor non-unik -> 422; WHERE non-BETWEEN -> 422; kolom cursor PK + BETWEEN -> 201.
 	if rec := env.doJSON(t, http.MethodPost, "/api/v1/databases/"+env.db1ID+"/migrations", env.editorSess, map[string]any{
 		"name":                "bad_batch_cursor",
-		"sql_up":              "UPDATE public.m2_batch_orders SET status = 'done' WHERE id > $1;",
-		"sql_down":            "UPDATE public.m2_batch_orders SET status = 'pending' WHERE id > $1;",
+		"sql_up":              "UPDATE public.m2_batch_orders SET status = 'done' WHERE status BETWEEN $1 AND $2;",
+		"sql_down":            "UPDATE public.m2_batch_orders SET status = 'pending' WHERE status BETWEEN $1 AND $2;",
 		"execution_mode":      "batch",
 		"batch_table":         "public.m2_batch_orders",
 		"batch_cursor_column": "status",
@@ -498,11 +498,22 @@ func TestM2AuthAdminExplorerBatchValidationAndRejectionIntegration(t *testing.T)
 	}); rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("batch with non-unique cursor = %d, want 422 (%s)", rec.Code, rec.Body.String())
 	}
+	if rec := env.doJSON(t, http.MethodPost, "/api/v1/databases/"+env.db1ID+"/migrations", env.editorSess, map[string]any{
+		"name":                "bad_batch_where",
+		"sql_up":              "UPDATE public.m2_batch_orders SET status = 'done' WHERE id > $1 AND id <= $2;",
+		"sql_down":            "UPDATE public.m2_batch_orders SET status = 'pending' WHERE id BETWEEN $1 AND $2;",
+		"execution_mode":      "batch",
+		"batch_table":         "public.m2_batch_orders",
+		"batch_cursor_column": "id",
+		"batch_size":          100,
+	}); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("batch with non-BETWEEN WHERE = %d, want 422 (%s)", rec.Code, rec.Body.String())
+	}
 
 	recBatch := env.doJSON(t, http.MethodPost, "/api/v1/databases/"+env.db1ID+"/migrations", env.editorSess, map[string]any{
 		"name":                "good_batch_orders",
-		"sql_up":              "UPDATE public.m2_batch_orders SET status = 'done' WHERE id > $1 AND id <= $2;",
-		"sql_down":            "UPDATE public.m2_batch_orders SET status = 'pending' WHERE id > $1 AND id <= $2;",
+		"sql_up":              "UPDATE public.m2_batch_orders SET status = 'done' WHERE id BETWEEN $1 AND $2;",
+		"sql_down":            "UPDATE public.m2_batch_orders SET status = 'pending' WHERE id BETWEEN $1 AND $2;",
 		"execution_mode":      "batch",
 		"batch_table":         "public.m2_batch_orders",
 		"batch_cursor_column": "id",

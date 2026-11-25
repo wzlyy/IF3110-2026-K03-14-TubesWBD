@@ -41,9 +41,11 @@ Pada pemindaian awal implementasi backend Milestone 2 (commit `64ef0d0`), CodeQL
 |---|---|---|---|
 | `6ede7c2` | Branch `fix/m2-codeql-log-sanitization` setelah perbaikan log injection | [`45046275169`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45046275169) | **Success (0 alert)** |
 | `8df59cd` | Merge PR #8 ke `main` (backend M2) | [`45047490984`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45047490984) | **Success (0 alert)** |
-| `7ea5343` | Commit terbaru `main` (PR #9: backend + worker + SPA React/TS + observabilitas) | [`45200770227`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45200770227) | **Success (0 alert)** |
+| `7ea5343` | Merge PR #9 ke `main` (backend + worker + SPA React/TS + observabilitas) | [`45200770227`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45200770227) | **Success (0 alert)** |
+| `31027b2` | PR #10 (`fix/m2-log-docs`: penyelarasan SPA React/TS `e5c4930`, skrip k6 `993f209`, & dokumen M2) | [`45608747471`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45608747471) | **Success (0 alert)** |
+| `1eabb21` | Merge PR #10 ke `main` (rescan bersih penuh Go + JS/TS) | [`45609367648`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45609367648) | **Success (0 alert)** |
 
-> **Catatan workspace lokal:** Hasil bersih pada run `45200770227` berlaku untuk commit `7ea5343` di `main`. Perubahan lokal setelah commit tersebut perlu di-push ke GitHub agar memperoleh status rescan GitHub Actions tersendiri.
+> **Catatan commit pasca-`1eabb21`:** Perubahan kode Go inkremental setelah `1eabb21` (`3970bce` penyeragaman atribut telemetri worker dan `8f807fe` *lazy* koneksi RabbitMQ) tetap melewati sanitasi `telemetry.LogEvent` serta query berparameter `$1`, dan telah lulus penuh pada workflow *Quality checks* (`go vet`, `go build`, `govulncheck`, integration test) di commit `7cc9c00` ([Run `45650226033`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45650226033)). Pada [Run CodeQL `45650226130`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45650226130) (`7cc9c00`), matriks `javascript-typescript` telah **Success (0 alert)**, sedangkan matriks `go` terdampak gangguan layanan GitHub Actions/API sementara (*`Error creating policy`*) sehingga rescan penuh berikutnya diperoleh saat *re-run* atau push commit terbaru ke `main`.
 
 ## 4. Batasan Analisis Statis (SAST)
 

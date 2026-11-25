@@ -368,18 +368,20 @@ func (s *WorkflowService) EnqueueRequest(ctx context.Context, requestID, actorUs
 	}
 
 	msg := queue.JobMessage{
-		JobID:             jobID,
-		ExecutionID:       execID,
-		RequestID:         requestID,
-		DatabaseID:        databaseID,
-		MigrationID:       migrationID,
-		ActionType:        actionType,
-		TargetExecutionID: targetExecID.String,
-		ExecutionMode:     execMode,
-		RequestedBy:       actorUserID,
-		AttemptNumber:     attemptNum,
-		RetryCount:        0,
-		EnqueuedAt:        time.Now().UTC(),
+		JobID:               jobID,
+		ExecutionID:         execID,
+		RequestID:           requestID,
+		DatabaseID:          databaseID,
+		DatabaseName:        telemetry.DatabaseFromContext(ctx),
+		MigrationID:         migrationID,
+		ActionType:          actionType,
+		TargetExecutionID:   targetExecID.String,
+		ExecutionMode:       execMode,
+		RequestedBy:         actorUserID,
+		RequestedByUsername: telemetry.ActorFromContext(ctx),
+		AttemptNumber:       attemptNum,
+		RetryCount:          0,
+		EnqueuedAt:          time.Now().UTC(),
 	}
 	if batchSizeOverride.Valid {
 		v := int(batchSizeOverride.Int32)

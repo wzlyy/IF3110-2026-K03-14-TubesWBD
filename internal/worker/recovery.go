@@ -21,7 +21,11 @@ func (a *attempt) open(ctx context.Context) error {
 	if kind != "postgres" {
 		return migration.ErrUnsupportedTargetDBMS
 	}
-	a.target = telemetry.WrapDB(db, a.j.DatabaseID)
+	dbLabel := a.dbName
+	if dbLabel == "" {
+		dbLabel = a.j.DatabaseID
+	}
+	a.target = telemetry.WrapDB(db, dbLabel)
 	return nil
 }
 
@@ -167,6 +171,7 @@ func (s *Service) verify(ctx context.Context, dbID, execution, token string) (er
 	if e = a.load(ctx); e != nil {
 		return e
 	}
+	ctx = a.withTelemetry(ctx)
 	status, e := a.inspect(ctx)
 	if e != nil {
 		return e
@@ -194,6 +199,7 @@ func (s *Service) Process(ctx context.Context, j queue.JobMessage) error {
 	if e = a.load(ctx); e != nil {
 		return e
 	}
+	ctx = a.withTelemetry(ctx)
 	var lease *lock.Lease
 	if a.continuation() {
 		lease, e = s.Locks.AcquireForRecoveryOrResume(ctx, j.DatabaseID, s.WorkerID, j.ExecutionID, j.TargetExecutionID, 0)

@@ -25,7 +25,18 @@ type attempt struct {
 	j                     queue.JobMessage
 	d                     *migration.Definition
 	snapshot, root, token string
+	dbName, actor         string
 	target                *telemetry.InstrumentedDB
+}
+
+func (a *attempt) withTelemetry(ctx context.Context) context.Context {
+	if a.dbName != "" {
+		ctx = telemetry.WithDatabase(ctx, a.dbName)
+	}
+	if a.actor != "" {
+		ctx = telemetry.WithActor(ctx, a.actor)
+	}
+	return ctx
 }
 
 func (a *attempt) continuation() bool {
@@ -40,6 +51,20 @@ func (a *attempt) load(ctx context.Context) error {
 	}
 	if r.JobID != j.JobID || r.DatabaseID != j.DatabaseID || r.MigrationID != j.MigrationID || r.ActionType != j.ActionType || r.TargetExecutionID != j.TargetExecutionID || r.ExecutionMode != j.ExecutionMode {
 		return errInvalidJob
+	}
+	a.dbName = r.DatabaseName
+	if a.dbName == "" {
+		a.dbName = j.DatabaseName
+	}
+	a.actor = j.RequestedByUsername
+	if a.actor == "" && (j.RequestedBy == "" || j.RequestedBy == r.RequestedBy) {
+		a.actor = r.RequestedByUsername
+	}
+	if a.actor == "" && j.RequestedBy != "" {
+		var uname string
+		if uerr := a.s.DB.QueryRowContext(ctx, "SELECT username FROM users WHERE id=$1", j.RequestedBy).Scan(&uname); uerr == nil && uname != "" {
+			a.actor = uname
+		}
 	}
 	a.j.BatchSizeOverride = r.BatchSizeOverride
 	a.d, e = migration.GetDefinition(ctx, a.s.DB, j.DatabaseID, j.MigrationID)

@@ -22,13 +22,15 @@ type JobMessage struct {
 	JobID             string    `json:"job_id"`
 	ExecutionID       string    `json:"execution_id"`
 	RequestID         string    `json:"request_id"`
-	DatabaseID        string    `json:"database_id"`
-	MigrationID       string    `json:"migration_id"`
-	ActionType        string    `json:"action_type"` // Jenis aksi: up, rollback, forward, resume_batch, revert_batch
-	TargetExecutionID string    `json:"target_execution_id,omitempty"`
-	ExecutionMode     string    `json:"execution_mode"` // Mode eksekusi: normal atau batch
-	BatchSizeOverride *int      `json:"batch_size_override,omitempty"`
-	RequestedBy       string    `json:"requested_by"`
+	DatabaseID          string    `json:"database_id"`
+	DatabaseName        string    `json:"database_name,omitempty"`
+	MigrationID         string    `json:"migration_id"`
+	ActionType          string    `json:"action_type"` // Jenis aksi: up, rollback, forward, resume_batch, revert_batch
+	TargetExecutionID   string    `json:"target_execution_id,omitempty"`
+	ExecutionMode       string    `json:"execution_mode"` // Mode eksekusi: normal atau batch
+	BatchSizeOverride   *int      `json:"batch_size_override,omitempty"`
+	RequestedBy         string    `json:"requested_by"`
+	RequestedByUsername string    `json:"requested_by_username,omitempty"`
 	AttemptNumber     int       `json:"attempt_number"`
 	RetryCount        int       `json:"retry_count"`
 	EnqueuedAt        time.Time `json:"enqueued_at"`

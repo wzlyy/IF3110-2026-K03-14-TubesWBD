@@ -88,7 +88,15 @@ func (s *Service) delivery(base context.Context, c *queue.RabbitMQClient, d amqp
 	ctx := queue.ExtractTraceContext(drain, d.Headers)
 	ctx = telemetry.WithCorrelationID(ctx, queue.AMQPHeaderCarrier(d.Headers).Get("x-correlation-id"))
 	ctx = telemetry.WithJobMeta(ctx, telemetry.JobLogMeta{MigrationID: j.MigrationID, ExecutionID: j.ExecutionID, JobID: j.JobID, Attempt: j.AttemptNumber})
-	ctx = telemetry.WithActor(telemetry.WithDatabase(ctx, j.DatabaseID), j.RequestedBy)
+	dbLabel := j.DatabaseName
+	if dbLabel == "" {
+		dbLabel = j.DatabaseID
+	}
+	actor := j.RequestedByUsername
+	if actor == "" {
+		actor = j.RequestedBy
+	}
+	ctx = telemetry.WithActor(telemetry.WithDatabase(ctx, dbLabel), actor)
 	ctx, span := telemetry.Tracer().Start(ctx, "worker.consume", trace.WithSpanKind(trace.SpanKindConsumer))
 	defer span.End()
 	err := s.Process(ctx, j)

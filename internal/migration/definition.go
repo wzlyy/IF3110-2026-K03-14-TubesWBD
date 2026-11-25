@@ -5,11 +5,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/database"
 )
 
@@ -75,6 +77,96 @@ type ValidationReport struct {
 	Message            string `json:"message,omitempty"`
 }
 
+var (
+	batchIdentRe  = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+	batchUpdateRe = regexp.MustCompile(`(?is)^UPDATE\s+([a-zA-Z_][\w]*(?:\.[a-zA-Z_][\w]*)?)\s+SET\s+(.+)$`)
+	batchWhereRe  = regexp.MustCompile(`(?i)\s+WHERE\s+`)
+)
+
+func stripLeadingSQLComments(s string) string {
+	for {
+		s = strings.TrimSpace(s)
+		if strings.HasPrefix(s, "--") {
+			idx := strings.IndexByte(s, '\n')
+			if idx < 0 {
+				return ""
+			}
+			s = s[idx+1:]
+			continue
+		}
+		if strings.HasPrefix(s, "/*") {
+			i := 2
+			depth := 1
+			for i < len(s) && depth > 0 {
+				if i+1 < len(s) && s[i:i+2] == "/*" {
+					depth++
+					i += 2
+				} else if i+1 < len(s) && s[i:i+2] == "*/" {
+					depth--
+					i += 2
+				} else {
+					i++
+				}
+			}
+			if depth != 0 {
+				return ""
+			}
+			s = s[i:]
+			continue
+		}
+		break
+	}
+	return strings.TrimSpace(s)
+}
+
+// BuildBatchUpdateSQL memvalidasi satu statement UPDATE mode batch serta aturan cursor BETWEEN $1 AND $2
+// agar validasi API/dry-run selaras penuh dengan eksekutor worker, lalu mengembalikan identifier dan SQL tersanitasi.
+func BuildBatchUpdateSQL(query, batchTable, cursorCol string) (sanitizedTable, sanitizedCol, statement string, err error) {
+	batchTable = strings.TrimSpace(batchTable)
+	cursorCol = strings.TrimSpace(cursorCol)
+	names := strings.Split(batchTable, ".")
+	if len(names) == 0 || len(names) > 2 {
+		return "", "", "", errors.New("invalid batch table")
+	}
+	for _, n := range append(append([]string{}, names...), cursorCol) {
+		if !batchIdentRe.MatchString(n) {
+			return "", "", "", errors.New("invalid batch identifier")
+		}
+	}
+	sanitizedTable = pgx.Identifier(names).Sanitize()
+	sanitizedCol = pgx.Identifier{cursorCol}.Sanitize()
+
+	stmts, err := ValidateSQL("postgres", query)
+	if err != nil {
+		return "", "", "", err
+	}
+	if len(stmts) != 1 {
+		return "", "", "", errors.New("batch requires one UPDATE")
+	}
+
+	cleanSQL := stripLeadingSQLComments(stmts[0].SQL)
+	match := batchUpdateRe.FindStringSubmatch(cleanSQL)
+	if len(match) != 3 || !(strings.EqualFold(match[1], batchTable) || strings.EqualFold("public."+match[1], batchTable) || strings.EqualFold(match[1], "public."+batchTable)) {
+		return "", "", "", errors.New("batch UPDATE must target configured table")
+	}
+	parts := batchWhereRe.Split(match[2], -1)
+	if len(parts) > 2 {
+		return "", "", "", errors.New("unsupported nested WHERE in batch UPDATE")
+	}
+	if len(parts) == 2 && !regexp.MustCompile(`(?i)^\s*`+regexp.QuoteMeta(cursorCol)+`\s+BETWEEN\s+\$1\s+AND\s+\$2\s*$`).MatchString(parts[1]) {
+		return "", "", "", errors.New("batch WHERE must use cursor BETWEEN $1 AND $2")
+	}
+	if strings.Contains(parts[0], "--") || strings.Contains(parts[0], "/*") || regexp.MustCompile(`(?i)\b(FROM|RETURNING)\b`).MatchString(parts[0]) {
+		return "", "", "", errors.New("unsupported batch UPDATE clause")
+	}
+	// Batch statements cannot change the key used for streaming and undo.
+	if regexp.MustCompile(`(?i)(^|,)\s*"?`+regexp.QuoteMeta(cursorCol)+`"?\s*=`).MatchString(parts[0]) || strings.HasPrefix(strings.TrimSpace(parts[0]), "(") {
+		return "", "", "", errors.New("batch cursor must remain immutable")
+	}
+	statement = "UPDATE " + sanitizedTable + " SET " + parts[0] + " WHERE " + sanitizedCol + " BETWEEN $1 AND $2"
+	return sanitizedTable, sanitizedCol, statement, nil
+}
+
 // ValidateDefinitionInput memvalidasi struktur dan SQL pada definisi migrasi.
 func ValidateDefinitionInput(in DefinitionInput) (DefinitionInput, *ValidationReport, error) {
 	in.Name = strings.TrimSpace(in.Name)
@@ -126,6 +218,14 @@ func ValidateDefinitionInput(in DefinitionInput) (DefinitionInput, *ValidationRe
 		if in.BatchSize == nil || *in.BatchSize <= 0 || *in.BatchSize > MaxBatchSize {
 			return in, nil, fmt.Errorf("%w: batch_size harus antara 1 dan %d", ErrInvalidDefinition, MaxBatchSize)
 		}
+		if _, _, _, err := BuildBatchUpdateSQL(in.SQLUp, in.BatchTable, in.BatchCursorColumn); err != nil {
+			return in, nil, fmt.Errorf("%w: sql_up mode batch tidak valid (%v)", ErrInvalidDefinition, err)
+		}
+		if !in.IsIrreversible {
+			if _, _, _, err := BuildBatchUpdateSQL(in.SQLDown, in.BatchTable, in.BatchCursorColumn); err != nil {
+				return in, nil, fmt.Errorf("%w: sql_down mode batch tidak valid (%v)", ErrInvalidDefinition, err)
+			}
+		}
 	default:
 		return in, nil, fmt.Errorf("%w: execution_mode harus 'normal' atau 'batch'", ErrInvalidDefinition)
 	}
@@ -139,7 +239,7 @@ func ValidateDefinitionInput(in DefinitionInput) (DefinitionInput, *ValidationRe
 }
 
 // ValidateBatchTargetCatalog memastikan batchTable dan cursorCol ada di katalog PostgreSQL
-// serta cursorCol memiliki PRIMARY KEY atau UNIQUE satu kolom.
+// serta cursorCol bersifat NOT NULL dan memiliki PRIMARY KEY atau UNIQUE satu kolom.
 func ValidateBatchTargetCatalog(catalog *database.Catalog, batchTable, cursorCol string) error {
 	if catalog == nil {
 		return fmt.Errorf("%w: katalog database target tidak tersedia", ErrBatchColumnInvalid)
@@ -154,15 +254,18 @@ func ValidateBatchTargetCatalog(catalog *database.Catalog, batchTable, cursorCol
 	if !ok {
 		return fmt.Errorf("%w: tabel %s.%s tidak ditemukan pada target database", ErrBatchColumnInvalid, schema, tableName)
 	}
-	colExists := false
-	for _, c := range tbl.Columns {
-		if c.Name == cursorCol {
-			colExists = true
+	var cursorColMeta *database.Column
+	for i := range tbl.Columns {
+		if tbl.Columns[i].Name == cursorCol {
+			cursorColMeta = &tbl.Columns[i]
 			break
 		}
 	}
-	if !colExists {
+	if cursorColMeta == nil {
 		return fmt.Errorf("%w: kolom cursor %q tidak ditemukan pada tabel %s.%s", ErrBatchColumnInvalid, cursorCol, schema, tableName)
+	}
+	if cursorColMeta.Nullable {
+		return fmt.Errorf("%w: kolom cursor %q pada %s.%s harus bersifat NOT NULL", ErrBatchColumnInvalid, cursorCol, schema, tableName)
 	}
 
 	isUniqueKey := false

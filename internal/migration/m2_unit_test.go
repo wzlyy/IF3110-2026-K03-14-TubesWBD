@@ -70,8 +70,8 @@ func TestValidateDefinitionInput(t *testing.T) {
 
 		clean, _, err := ValidateDefinitionInput(DefinitionInput{
 			Name:              "batch_good",
-			SQLUp:             "UPDATE orders SET status = 'archived' WHERE id > $1 AND id <= $2;",
-			SQLDown:           "UPDATE orders SET status = 'active' WHERE id > $1 AND id <= $2;",
+			SQLUp:             "-- SQL up\nUPDATE orders SET status = 'archived' WHERE id BETWEEN $1 AND $2;",
+			SQLDown:           "/* revert */ UPDATE orders SET status = 'active' WHERE id BETWEEN $1 AND $2;",
 			ExecutionMode:     ModeBatch,
 			BatchTable:        "public.orders",
 			BatchCursorColumn: "id",
@@ -79,6 +79,107 @@ func TestValidateDefinitionInput(t *testing.T) {
 		})
 		if err != nil || clean.BatchSize == nil || *clean.BatchSize != 5000 {
 			t.Fatalf("expected valid batch definition, err=%v", err)
+		}
+
+		// UPDATE tanpa WHERE pada mode batch juga valid dan akan ditambahkan WHERE <cursor> BETWEEN $1 AND $2 oleh worker.
+		if _, _, err := ValidateDefinitionInput(DefinitionInput{
+			Name:              "batch_no_where",
+			SQLUp:             "UPDATE public.orders SET status = 'archived';",
+			SQLDown:           "UPDATE public.orders SET status = 'active';",
+			ExecutionMode:     ModeBatch,
+			BatchTable:        "public.orders",
+			BatchCursorColumn: "id",
+			BatchSize:         &bs,
+		}); err != nil {
+			t.Fatalf("expected batch UPDATE without WHERE to pass, got %v", err)
+		}
+	})
+
+	t.Run("batch mode rejects incompatible SQL clauses matching worker batchSpec", func(t *testing.T) {
+		badCases := []struct {
+			name string
+			in   DefinitionInput
+		}{
+			{
+				name: "legacy range predicates in WHERE",
+				in: DefinitionInput{
+					Name:              "batch_range_gt_lte",
+					SQLUp:             "UPDATE public.orders SET status = 'archived' WHERE id > $1 AND id <= $2;",
+					SQLDown:           "UPDATE public.orders SET status = 'active' WHERE id BETWEEN $1 AND $2;",
+					ExecutionMode:     ModeBatch,
+					BatchTable:        "public.orders",
+					BatchCursorColumn: "id",
+					BatchSize:         &bs,
+				},
+			},
+			{
+				name: "multiple statements",
+				in: DefinitionInput{
+					Name:              "batch_multi",
+					SQLUp:             "UPDATE public.orders SET status = 'a' WHERE id BETWEEN $1 AND $2; UPDATE public.orders SET status = 'b' WHERE id BETWEEN $1 AND $2;",
+					SQLDown:           "UPDATE public.orders SET status = 'c' WHERE id BETWEEN $1 AND $2;",
+					ExecutionMode:     ModeBatch,
+					BatchTable:        "public.orders",
+					BatchCursorColumn: "id",
+					BatchSize:         &bs,
+				},
+			},
+			{
+				name: "different target table",
+				in: DefinitionInput{
+					Name:              "batch_wrong_table",
+					SQLUp:             "UPDATE public.other_orders SET status = 'archived' WHERE id BETWEEN $1 AND $2;",
+					SQLDown:           "UPDATE public.orders SET status = 'active' WHERE id BETWEEN $1 AND $2;",
+					ExecutionMode:     ModeBatch,
+					BatchTable:        "public.orders",
+					BatchCursorColumn: "id",
+					BatchSize:         &bs,
+				},
+			},
+			{
+				name: "mutating cursor column",
+				in: DefinitionInput{
+					Name:              "batch_mutate_cursor",
+					SQLUp:             "UPDATE public.orders SET id = id + 1 WHERE id BETWEEN $1 AND $2;",
+					SQLDown:           "UPDATE public.orders SET status = 'active' WHERE id BETWEEN $1 AND $2;",
+					ExecutionMode:     ModeBatch,
+					BatchTable:        "public.orders",
+					BatchCursorColumn: "id",
+					BatchSize:         &bs,
+				},
+			},
+			{
+				name: "FROM or RETURNING clause",
+				in: DefinitionInput{
+					Name:              "batch_returning",
+					SQLUp:             "UPDATE public.orders SET status = 'archived' RETURNING id;",
+					SQLDown:           "UPDATE public.orders SET status = 'active' WHERE id BETWEEN $1 AND $2;",
+					ExecutionMode:     ModeBatch,
+					BatchTable:        "public.orders",
+					BatchCursorColumn: "id",
+					BatchSize:         &bs,
+				},
+			},
+			{
+				name: "invalid sql_down in reversible batch",
+				in: DefinitionInput{
+					Name:              "batch_bad_down",
+					SQLUp:             "UPDATE public.orders SET status = 'archived' WHERE id BETWEEN $1 AND $2;",
+					SQLDown:           "UPDATE public.orders SET status = 'active' WHERE id > $1 AND id <= $2;",
+					ExecutionMode:     ModeBatch,
+					BatchTable:        "public.orders",
+					BatchCursorColumn: "id",
+					BatchSize:         &bs,
+				},
+			},
+		}
+		for _, tc := range badCases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, _, err := ValidateDefinitionInput(tc.in)
+				if !errors.Is(err, ErrInvalidDefinition) {
+					t.Fatalf("%s: expected ErrInvalidDefinition, got %v", tc.name, err)
+				}
+			})
 		}
 	})
 
@@ -107,11 +208,13 @@ func TestValidateBatchTargetCatalog(t *testing.T) {
 				Columns: []database.Column{
 					{Name: "id", DataType: "bigint"},
 					{Name: "code", DataType: "text"},
+					{Name: "opt_code", DataType: "text", Nullable: true},
 					{Name: "status", DataType: "text"},
 				},
 				Constraints: []database.Constraint{
 					{Name: "orders_pkey", Type: "PRIMARY KEY", Columns: []string{"id"}},
 					{Name: "orders_code_key", Type: "UNIQUE", Columns: []string{"code"}},
+					{Name: "orders_opt_code_key", Type: "UNIQUE", Columns: []string{"opt_code"}},
 				},
 			}},
 		}},
@@ -122,6 +225,9 @@ func TestValidateBatchTargetCatalog(t *testing.T) {
 	}
 	if err := ValidateBatchTargetCatalog(cat, "public.orders", "code"); err != nil {
 		t.Fatalf("expected UNIQUE cursor column to pass: %v", err)
+	}
+	if err := ValidateBatchTargetCatalog(cat, "public.orders", "opt_code"); !errors.Is(err, ErrBatchColumnInvalid) {
+		t.Fatalf("expected nullable UNIQUE cursor column to fail, got %v", err)
 	}
 	if err := ValidateBatchTargetCatalog(cat, "orders", "status"); !errors.Is(err, ErrBatchColumnInvalid) {
 		t.Fatalf("expected non-unique cursor column to fail, got %v", err)

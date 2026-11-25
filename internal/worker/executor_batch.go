@@ -5,10 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"regexp"
-	"strings"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/migration"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/telemetry"
 )
@@ -23,23 +20,8 @@ type batchSpec struct {
 	size                  int
 }
 
-var ident = regexp.MustCompile("^[a-zA-Z_][a-zA-Z0-9_]*$")
-var update = regexp.MustCompile(`(?is)^UPDATE\s+([a-zA-Z_][\w]*(?:\.[a-zA-Z_][\w]*)?)\s+SET\s+(.+)$`)
-var where = regexp.MustCompile(`(?i)\s+WHERE\s+`)
-
 func (a *attempt) batchSpec() (batchSpec, error) {
 	var b batchSpec
-	names := strings.Split(a.d.BatchTable, ".")
-	if len(names) > 2 {
-		return b, errors.New("invalid batch table")
-	}
-	for _, n := range append(append([]string{}, names...), a.d.BatchCursorColumn) {
-		if !ident.MatchString(n) {
-			return b, errors.New("invalid batch identifier")
-		}
-	}
-	b.table = pgx.Identifier(names).Sanitize()
-	b.col = pgx.Identifier{a.d.BatchCursorColumn}.Sanitize()
 	if a.d.BatchSize == nil {
 		return b, errors.New("missing batch size")
 	}
@@ -50,33 +32,11 @@ func (a *attempt) batchSpec() (batchSpec, error) {
 	if b.size < 1 || b.size > migration.MaxBatchSize {
 		return b, errors.New("invalid batch size")
 	}
-
-	stmts, e := migration.ValidateSQL("postgres", a.snapshot)
-	if e != nil {
-		return b, e
+	table, col, stmt, err := migration.BuildBatchUpdateSQL(a.snapshot, a.d.BatchTable, a.d.BatchCursorColumn)
+	if err != nil {
+		return b, err
 	}
-	if len(stmts) != 1 {
-		return b, errors.New("batch requires one UPDATE")
-	}
-	match := update.FindStringSubmatch(stmts[0].SQL)
-	if len(match) != 3 || !(strings.EqualFold(match[1], a.d.BatchTable) || strings.EqualFold("public."+match[1], a.d.BatchTable) || strings.EqualFold(match[1], "public."+a.d.BatchTable)) {
-		return b, errors.New("batch UPDATE must target configured table")
-	}
-	parts := where.Split(match[2], -1)
-	if len(parts) > 2 {
-		return b, errors.New("unsupported nested WHERE in batch UPDATE")
-	}
-	if len(parts) == 2 && !regexp.MustCompile(`(?i)^\s*`+regexp.QuoteMeta(a.d.BatchCursorColumn)+`\s+BETWEEN\s+\$1\s+AND\s+\$2\s*$`).MatchString(parts[1]) {
-		return b, errors.New("batch WHERE must use cursor BETWEEN $1 AND $2")
-	}
-	if strings.Contains(parts[0], "--") || strings.Contains(parts[0], "/*") || regexp.MustCompile(`(?i)\b(FROM|RETURNING)\b`).MatchString(parts[0]) {
-		return b, errors.New("unsupported batch UPDATE clause")
-	}
-	// Batch statements cannot change the key used for streaming and undo.
-	if regexp.MustCompile(`(?i)(^|,)\s*"?`+regexp.QuoteMeta(a.d.BatchCursorColumn)+`"?\s*=`).MatchString(parts[0]) || strings.HasPrefix(strings.TrimSpace(parts[0]), "(") {
-		return b, errors.New("batch cursor must remain immutable")
-	}
-	b.statement = "UPDATE " + b.table + " SET " + parts[0] + " WHERE " + b.col + " BETWEEN $1 AND $2"
+	b.table, b.col, b.statement = table, col, stmt
 	return b, nil
 }
 

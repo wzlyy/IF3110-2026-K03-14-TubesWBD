@@ -84,13 +84,15 @@ func main() {
 	lockManager := lock.NewManager(db)
 
 	var publisher queue.Publisher
-	rmqClient, rmqErr := queue.NewRabbitMQClient(cfg.RabbitMQURL)
-	if rmqErr != nil {
-		telemetry.LogAudit(context.Background(), "queue.connect", "error", slog.String("error", rmqErr.Error()))
-	} else {
+	if cfg.RabbitMQURL != "" {
+		rmqClient, rmqErr := queue.NewLazyRabbitMQClient(cfg.RabbitMQURL)
 		publisher = rmqClient
 		defer rmqClient.Close()
-		telemetry.LogAudit(context.Background(), "queue.connect", "ok")
+		if rmqErr != nil {
+			telemetry.LogAudit(context.Background(), "queue.connect", "deferred", slog.String("error", rmqErr.Error()))
+		} else {
+			telemetry.LogAudit(context.Background(), "queue.connect", "ok")
+		}
 	}
 
 	// 6. Daftarkan REST JSON API (/api/v1/*) dan Prometheus /metrics

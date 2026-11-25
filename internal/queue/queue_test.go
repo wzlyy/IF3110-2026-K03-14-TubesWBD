@@ -193,3 +193,17 @@ func TestEndToEndTracePropagationAPIToWorkerSQL(t *testing.T) {
 	}
 	t.Logf("=== SAMPLE_JSON_LOGS ===\n%s=== SAMPLE_OTEL_SPANS ===\n%s", logBuf.String(), spanBuf.String())
 }
+
+func TestNewLazyRabbitMQClientReturnsNonNilOnUnavailableBroker(t *testing.T) {
+	c, err := NewLazyRabbitMQClient("amqp://guest:guest@127.0.0.1:1/")
+	if err == nil {
+		_ = c.Close()
+		t.Fatal("expected initial dial error for unavailable broker")
+	}
+	if c == nil {
+		t.Fatal("expected non-nil RabbitMQClient for lazy reconnect")
+	}
+	if cerr := c.Close(); cerr != nil {
+		t.Fatalf("Close() on unconnected lazy client returned error: %v", cerr)
+	}
+}

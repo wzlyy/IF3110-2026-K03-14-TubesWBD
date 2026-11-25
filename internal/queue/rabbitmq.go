@@ -36,6 +36,14 @@ func NewRabbitMQClient(url string) (*RabbitMQClient, error) {
 	return c, nil
 }
 
+// NewLazyRabbitMQClient mencoba koneksi awal namun tetap mengembalikan client non-nil
+// agar ensureChannel() dapat menyambung otomatis saat broker siap atau setelah restart.
+func NewLazyRabbitMQClient(url string) (*RabbitMQClient, error) {
+	c := &RabbitMQClient{url: url}
+	err := c.connect()
+	return c, err
+}
+
 func (c *RabbitMQClient) connect() error {
 	conn, err := amqp.DialConfig(c.url, amqp.Config{
 		Dial: amqp.DefaultDial(5 * time.Second),

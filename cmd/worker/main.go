@@ -51,7 +51,7 @@ func run() error {
 	defer targets.Close()
 	metrics := telemetry.GlobalMetrics()
 	metrics.RegisterDBPool("platform", db.Stats)
-	metrics.RegisterDBPool("target", targets.AggregatePoolStats)
+	metrics.RegisterDBPool("target_postgres", targets.AggregatePoolStats)
 	metrics.RegisterJobInflightDB(db)
 	addr := os.Getenv("WORKER_METRICS_ADDR")
 	if addr == "" {

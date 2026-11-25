@@ -68,15 +68,15 @@ export default function JobPage() {
         : 5;
   return (
     <section className="m2">
-      <h1>Job monitor</h1>
+      <h1>Pemantauan job</h1>
       <Feedback error={error || defs.error || action.error} />
-      {error && <button onClick={refresh}>Retry</button>}
+      {error && <button onClick={refresh}>Coba lagi</button>}
       {j && (
         <>
           <div className="m2-actions">
-            <Link to={"/requests/" + j.request_id}>Change request</Link>
+            <Link to={"/requests/" + j.request_id}>Permintaan perubahan</Link>
             <Link to={dbPath(j.database_id) + "/history"}>
-              Execution history
+              Riwayat eksekusi
             </Link>
           </div>
           <article className="m2-panel">
@@ -84,14 +84,14 @@ export default function JobPage() {
             <p>
               Job <code>{id}</code>
             </p>
-            <ol className="m2-stages" aria-label="Execution lifecycle">
+            <ol className="m2-stages" aria-label="Siklus hidup eksekusi">
               {[
-                "Draft",
-                "Pending review",
-                "Approved",
-                "Queue",
-                "Running",
-                "Terminal",
+                "Draf",
+                "Menunggu tinjauan",
+                "Disetujui",
+                "Antrean",
+                "Berjalan",
+                "Selesai",
               ].map((label, i) => (
                 <li key={label} aria-current={i === stage ? "step" : undefined}>
                   {label}
@@ -104,8 +104,8 @@ export default function JobPage() {
             {e?.error_message && <p className="m2-error">{e.error_message}</p>}
             {j.request_status === "uncertain" && (
               <p>
-                Execution outcome requires reconciliation before another
-                migration can proceed.
+                Hasil eksekusi memerlukan rekonsiliasi sebelum migrasi lain
+                dapat dijalankan.
               </p>
             )}
             <div className="m2-actions">
@@ -133,38 +133,40 @@ export default function JobPage() {
                         }
                       >
                         {type === "resume_batch"
-                          ? "Resume batch"
-                          : "Revert batch"}
+                          ? "Lanjutkan batch"
+                          : "Batalkan batch (revert)"}
                       </button>
                     ),
                 )}
             </div>
           </article>
           <article className="m2-panel">
-            <h2>Committed progress</h2>
+            <h2>Progres terkomit</h2>
             <p>
-              {e?.total_batches_committed ?? 0} batches ·{" "}
-              {e?.total_rows_affected ?? 0} rows
+              {e?.total_batches_committed ?? 0} batch ·{" "}
+              {e?.total_rows_affected ?? 0} baris
             </p>
             {j.request_status !== "success" &&
             (active(j) || j.batch_progress?.length) ? (
               <progress
                 value={cursorProgress(j.batch_progress)}
                 max={1}
-                aria-label="Cursor progress"
+                aria-label="Progres cursor"
               />
             ) : null}
             {j.request_status === "success" && (
-              <progress value={1} max={1} aria-label="Execution complete" />
+              <progress value={1} max={1} aria-label="Eksekusi selesai" />
             )}
             {!!j.batch_progress?.length && (
               <div className="m2-scroll">
                 <table>
                   <thead>
                     <tr>
-                      {["Batch", "Cursor range", "Rows", "Status"].map((h) => (
-                        <th key={h}>{h}</th>
-                      ))}
+                      {["Batch", "Rentang cursor", "Baris", "Status"].map(
+                        (h) => (
+                          <th key={h}>{h}</th>
+                        ),
+                      )}
                     </tr>
                   </thead>
                   <tbody>

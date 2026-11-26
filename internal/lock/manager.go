@@ -87,11 +87,21 @@ func (m *Manager) now() time.Time {
 	return time.Now().UTC()
 }
 
+// RowQuerier allows lock lookups to share an active transaction or connection pool.
+type RowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 // GetLock mengambil data lock saat ini untuk database, atau ErrLockNotFound jika tidak terkunci.
 func (m *Manager) GetLock(ctx context.Context, databaseID string) (*LockInfo, error) {
+	return GetLock(ctx, m.DB, databaseID)
+}
+
+// GetLock membaca data lock saat ini menggunakan RowQuerier (*sql.DB atau *sql.Tx).
+func GetLock(ctx context.Context, q RowQuerier, databaseID string) (*LockInfo, error) {
 	var info LockInfo
 	var state string
-	err := m.DB.QueryRowContext(ctx, `
+	err := q.QueryRowContext(ctx, `
 		SELECT database_id, lock_token, worker_id, execution_id, hold_state, acquired_at, heartbeat_at, expires_at
 		FROM database_locks
 		WHERE database_id = $1
@@ -130,7 +140,6 @@ func (m *Manager) Acquire(ctx context.Context, databaseID, workerID, executionID
 	)
 	defer span.End()
 
-	started := time.Now()
 	now := m.now()
 	expiresAt := now.Add(ttl)
 	token := uuid.NewString()
@@ -150,7 +159,6 @@ func (m *Manager) Acquire(ctx context.Context, databaseID, workerID, executionID
 		return nil, fmt.Errorf("check lock rows affected: %w", err)
 	}
 	if rows == 1 {
-		telemetry.GlobalMetrics().ObserveLockWait(time.Since(started))
 		telemetry.LogAudit(ctx, "lock.acquire", "ok",
 			slog.String("database_id", databaseID),
 			slog.String("worker_id", workerID),

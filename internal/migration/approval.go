@@ -257,9 +257,15 @@ func DecideApproval(ctx context.Context, db *sql.DB, requestID, actorUserID, dec
 	return GetRequestDetail(ctx, db, requestID)
 }
 
+// DBQuerier allows approval queries to share an active *sql.Tx or use *sql.DB.
+type DBQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 // VerifyCurrentApprovals memastikan setiap grup berakses VIEW_ONLY/VIEW_EDIT pada databaseID
 // memiliki leader aktif dan baris persetujuan 'approved' dari leader tersebut (untuk API dan Worker).
-func VerifyCurrentApprovals(ctx context.Context, db *sql.DB, requestID, databaseID string) error {
+func VerifyCurrentApprovals(ctx context.Context, db DBQuerier, requestID, databaseID string) error {
 	rows, err := db.QueryContext(ctx, `
 		SELECT g.id, g.name, COALESCE(g.leader_user_id, ''), COALESCE(u.is_active, FALSE),
 		       COALESCE(ma.decision, ''), COALESCE(ma.leader_user_id, '')
@@ -300,7 +306,7 @@ func VerifyCurrentApprovals(ctx context.Context, db *sql.DB, requestID, database
 }
 
 // ListApprovalsForRequest mengambil semua catatan persetujuan grup untuk satu request.
-func ListApprovalsForRequest(ctx context.Context, db *sql.DB, requestID string) ([]ApprovalRecord, error) {
+func ListApprovalsForRequest(ctx context.Context, db DBQuerier, requestID string) ([]ApprovalRecord, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT ma.id, ma.request_id, ma.group_id, g.name,
 		       ma.leader_user_id, COALESCE(u.username, ''),
@@ -327,6 +333,42 @@ func ListApprovalsForRequest(ctx context.Context, db *sql.DB, requestID string) 
 			return nil, err
 		}
 		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// ListApprovalsForRequests memuat catatan persetujuan untuk banyak request dalam satu query.
+func ListApprovalsForRequests(ctx context.Context, db DBQuerier, requestIDs []string) (map[string][]ApprovalRecord, error) {
+	out := make(map[string][]ApprovalRecord, len(requestIDs))
+	if len(requestIDs) == 0 {
+		return out, nil
+	}
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT ma.id, ma.request_id, ma.group_id, g.name,
+		       ma.leader_user_id, COALESCE(u.username, ''),
+		       ma.required_access_level, ma.decision, ma.comment, ma.decided_at
+		FROM migration_approvals ma
+		JOIN groups g ON g.id = ma.group_id
+		LEFT JOIN users u ON u.id = ma.leader_user_id
+		WHERE ma.request_id = ANY($1::text[])
+		ORDER BY ma.request_id ASC, g.name ASC
+	`, requestIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var a ApprovalRecord
+		if err := rows.Scan(
+			&a.ID, &a.RequestID, &a.GroupID, &a.GroupName,
+			&a.LeaderUserID, &a.LeaderUsername,
+			&a.RequiredAccessLevel, &a.Decision, &a.Comment, &a.DecidedAt,
+		); err != nil {
+			return nil, err
+		}
+		out[a.RequestID] = append(out[a.RequestID], a)
 	}
 	return out, rows.Err()
 }

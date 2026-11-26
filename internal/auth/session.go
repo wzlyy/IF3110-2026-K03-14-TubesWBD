@@ -12,11 +12,12 @@ import (
 )
 
 const (
-	CookieSessionName = "session_id"
-	IdleTimeout       = 30 * time.Minute
-	AbsoluteTimeout   = 8 * time.Hour
-	RotationInterval  = 15 * time.Minute
-	GracePeriod       = 30 * time.Second
+	CookieSessionName      = "session_id"
+	IdleTimeout            = 30 * time.Minute
+	AbsoluteTimeout        = 8 * time.Hour
+	RotationInterval       = 15 * time.Minute
+	GracePeriod            = 30 * time.Second
+	ActivityUpdateInterval = time.Minute
 )
 
 var (
@@ -122,7 +123,10 @@ func GetSession(ctx context.Context, db *sql.DB, token string) (*Session, bool, 
 		}
 		return nil, false, fmt.Errorf("session query error: %w", err)
 	}
-	_, _ = db.ExecContext(ctx, "DELETE FROM session_grace_tokens WHERE session_id=$1 AND expires_at<=$2", s.ID, now)
+	wasPrevious := token != s.ID
+	if aliasExpiresAt.Valid || wasPrevious {
+		_, _ = db.ExecContext(ctx, "DELETE FROM session_grace_tokens WHERE session_id=$1 AND expires_at<=$2", s.ID, now)
+	}
 
 	// 1. Check Absolute Expiration (8 hours from creation)
 	if now.After(s.ExpiresAt) {
@@ -137,7 +141,6 @@ func GetSession(ctx context.Context, db *sql.DB, token string) (*Session, bool, 
 	}
 
 	// 3. Check if the token presented was the previous (grace period) token
-	wasPrevious := token != s.ID
 	if wasPrevious {
 		deadline := aliasExpiresAt
 		if s.PreviousID.Valid && s.PreviousID.String == token {
@@ -151,10 +154,12 @@ func GetSession(ctx context.Context, db *sql.DB, token string) (*Session, bool, 
 		return &s, true, nil
 	}
 
-	// 4. Update last_active_at for active session
-	updateQuery := `UPDATE sessions SET last_active_at = $1 WHERE id = $2`
-	_, _ = db.ExecContext(ctx, updateQuery, now, s.ID)
-	s.LastActiveAt = now
+	// 4. Update last_active_at for active session (throttled to reduce write contention)
+	if now.Sub(s.LastActiveAt) > ActivityUpdateInterval {
+		updateQuery := `UPDATE sessions SET last_active_at = $1 WHERE id = $2`
+		_, _ = db.ExecContext(ctx, updateQuery, now, s.ID)
+		s.LastActiveAt = now
+	}
 
 	return &s, wasPrevious, nil
 }

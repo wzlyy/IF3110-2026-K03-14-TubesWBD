@@ -324,13 +324,13 @@ func (s *WorkflowService) EnqueueRequest(ctx context.Context, requestID, actorUs
 		return nil, fmt.Errorf("%w: hanya request berstatus 'approved' yang dapat dimasukkan ke queue (status saat ini: %s)", ErrInvalidStateChange, status)
 	}
 
-	if err := VerifyCurrentApprovals(ctx, s.DB, requestID, databaseID); err != nil {
+	if err := VerifyCurrentApprovals(ctx, tx, requestID, databaseID); err != nil {
 		return nil, err
 	}
 
 	// Cegah enqueue migrasi lain saat lock DB berstatus held_partial atau held_uncertain.
 	if s.Locks != nil {
-		li, lerr := s.Locks.GetLock(ctx, databaseID)
+		li, lerr := lock.GetLock(ctx, tx, databaseID)
 		if lerr == nil && li != nil {
 			if li.HoldState == lock.StateHeldUncertain {
 				return nil, ErrDatabaseBlocked
@@ -544,11 +544,20 @@ func ListRequestsForUser(ctx context.Context, db *sql.DB, userID, databaseID str
 	}
 	rows.Close()
 
+	requestIDs := make([]string, len(base))
+	for i, r := range base {
+		requestIDs[i] = r.ID
+	}
+	approvalsByReq, err := ListApprovalsForRequests(ctx, db, requestIDs)
+	if err != nil {
+		return nil, err
+	}
+
 	details := make([]RequestDetail, 0, len(base))
 	for _, r := range base {
-		approvals, err := ListApprovalsForRequest(ctx, db, r.ID)
-		if err != nil {
-			return nil, err
+		approvals := approvalsByReq[r.ID]
+		if approvals == nil {
+			approvals = make([]ApprovalRecord, 0)
 		}
 		details = append(details, RequestDetail{
 			MigrationRequest: r,

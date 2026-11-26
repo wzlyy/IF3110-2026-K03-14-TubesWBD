@@ -87,7 +87,7 @@ export function Review() {
             </p>
             {r.approval_stale && (
               <p className="m2-error" role="alert">
-                Persetujuan tidak lagi valid karena perubahan grant database atau leader grup. Ajukan ulang tinjauan atau batalkan permintaan ini.
+                Persetujuan tidak lagi valid karena perubahan grant database atau leader grup. Ajukan ulang tinjauan agar daftar persetujuan grup diperbarui.
               </p>
             )}
             {r.target_execution_id && (
@@ -172,15 +172,6 @@ export function Review() {
                   Masukkan ke antrean eksekusi
                 </button>
               )}
-              {canEdit &&
-                ["draft", "pending_review", "approved"].includes(r.status) && (
-                  <button
-                    disabled={action.busy}
-                    onClick={() => submit("cancel")}
-                  >
-                    Batalkan permintaan
-                  </button>
-                )}
               {r.job_id && <Link to={"/jobs/" + r.job_id}>Pantau job</Link>}
               <button disabled={action.busy} onClick={refresh}>
                 Segarkan status

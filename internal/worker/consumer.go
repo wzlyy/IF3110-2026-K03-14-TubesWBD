@@ -9,6 +9,7 @@ import (
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/database"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/lock"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/migration"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/queue"
@@ -29,7 +30,9 @@ func (s *Service) Run(ctx context.Context, url string, concurrency int) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		slog.Warn("reconnecting migration consumer", "error", e)
+		telemetry.LogAudit(ctx, "worker.consumer.reconnect", "retrying",
+			slog.String("error", telemetry.RedactString(e.Error())),
+		)
 		select {
 		case <-ctx.Done():
 			return nil
@@ -123,7 +126,12 @@ func (s *Service) delivery(base context.Context, c retryPublisher, d amqp.Delive
 		d.Nack(false, true)
 		return
 	}
-	if errors.Is(err, errInvalidJob) || errors.Is(err, migration.ErrRequestNotFound) || errors.Is(err, migration.ErrDefinitionNotFound) {
+	if errors.Is(err, errInvalidJob) ||
+		errors.Is(err, errRevisionChanged) ||
+		errors.Is(err, migration.ErrRequestNotFound) ||
+		errors.Is(err, migration.ErrDefinitionNotFound) ||
+		errors.Is(err, migration.ErrUnsupportedTargetDBMS) ||
+		errors.Is(err, database.ErrConnectionNotFound) {
 		d.Reject(false)
 		return
 	}
@@ -152,10 +160,13 @@ func (s *Service) delivery(base context.Context, c retryPublisher, d amqp.Delive
 		j.RetryCount++
 		telemetry.GlobalMetrics().RecordJobRetry(j.ActionType)
 		err = c.PublishRetry(ctx, j, delay)
-	} else {
+	} else if errors.Is(err, errNextAttempt) || isTransient(err) {
 		// Process records the final SQL failure before returning nil. If platform
 		// storage is down, preserve delivery until we can read/write that decision.
 		err = c.PublishRetry(ctx, j, lock.DefaultLeaseTTL)
+	} else {
+		d.Reject(false)
+		return
 	}
 	if err != nil {
 		d.Nack(false, true)

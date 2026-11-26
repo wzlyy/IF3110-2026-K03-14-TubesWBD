@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/database"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/lock"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/migration"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/queue"
@@ -265,7 +266,14 @@ func TestDeliveryRetryDecisionsAndStructuredLogs(t *testing.T) {
 		}
 	})
 
-	for _, permanentErr := range []error{errInvalidJob, migration.ErrRequestNotFound, migration.ErrDefinitionNotFound} {
+	for _, permanentErr := range []error{
+		errInvalidJob,
+		errRevisionChanged,
+		migration.ErrRequestNotFound,
+		migration.ErrDefinitionNotFound,
+		migration.ErrUnsupportedTargetDBMS,
+		database.ErrConnectionNotFound,
+	} {
 		t.Run("permanent metadata error rejects: "+permanentErr.Error(), func(t *testing.T) {
 			ack := &fakeAck{}
 			pub := &fakeRetryPub{}
@@ -276,6 +284,18 @@ func TestDeliveryRetryDecisionsAndStructuredLogs(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("non-transient poison error rejects to DLQ once retries exhausted", func(t *testing.T) {
+		ack := &fakeAck{}
+		pub := &fakeRetryPub{}
+		poisonJob := baseJob
+		poisonJob.RetryCount = queue.MaxTransientRetries
+		svc := Service{processFn: func(context.Context, queue.JobMessage) error { return errors.New("corrupt payload") }}
+		svc.delivery(context.Background(), pub, makeDelivery(poisonJob, ack))
+		if len(ack.rejects) != 1 || ack.rejects[0] || len(pub.calls) != 0 {
+			t.Fatalf("expected DLQ reject for exhausted non-transient poison error, rejects=%v retries=%d", ack.rejects, len(pub.calls))
+		}
+	})
 
 	t.Run("verification pending uses lease TTL beyond transient retry budget and preserves lock wait start", func(t *testing.T) {
 		ack := &fakeAck{}

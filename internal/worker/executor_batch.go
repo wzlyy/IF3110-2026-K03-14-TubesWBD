@@ -16,8 +16,8 @@ type checkpoint struct {
 	rows            int64
 }
 type batchSpec struct {
-	table, col, statement string
-	size                  int
+	table, col, extraWhere, statement string
+	size                              int
 }
 
 func (a *attempt) batchSpec() (batchSpec, error) {
@@ -32,11 +32,11 @@ func (a *attempt) batchSpec() (batchSpec, error) {
 	if b.size < 1 || b.size > migration.MaxBatchSize {
 		return b, errors.New("invalid batch size")
 	}
-	table, col, stmt, err := migration.BuildBatchUpdateSQL(a.snapshot, a.d.BatchTable, a.d.BatchCursorColumn)
+	plan, err := migration.ParseBatchUpdateSQL(a.snapshot, a.d.BatchTable, a.d.BatchCursorColumn)
 	if err != nil {
 		return b, err
 	}
-	b.table, b.col, b.statement = table, col, stmt
+	b.table, b.col, b.extraWhere, b.statement = plan.Table, plan.Column, plan.ExtraWhere, plan.Statement
 	return b, nil
 }
 
@@ -60,7 +60,14 @@ func (a *attempt) batch(ctx context.Context) error {
 	var last checkpoint
 	e = a.target.QueryRowContext(ctx, "SELECT batch_number,cursor_end,target_max_cursor FROM _platform_meta.batch_checkpoints WHERE execution_id=$1 ORDER BY batch_number DESC LIMIT 1", a.root).Scan(&last.number, &last.end, &last.max)
 	if errors.Is(e, sql.ErrNoRows) {
-		e = a.target.QueryRowContext(ctx, "SELECT min("+b.col+")::text,max("+b.col+")::text FROM "+b.table).Scan(&min, &max)
+		whereClause := ""
+		if b.extraWhere != "" {
+			whereClause = " WHERE (" + b.extraWhere + ")"
+		}
+		boundsQuery := "SELECT " +
+			"(SELECT " + b.col + "::text FROM " + b.table + whereClause + " ORDER BY " + b.col + " ASC LIMIT 1)," +
+			"(SELECT " + b.col + "::text FROM " + b.table + whereClause + " ORDER BY " + b.col + " DESC LIMIT 1)"
+		e = a.target.QueryRowContext(ctx, boundsQuery).Scan(&min, &max)
 		last.max = max.String
 	}
 	if e != nil {
@@ -104,26 +111,50 @@ func (a *attempt) forwardBatch(ctx context.Context, tx *telemetry.InstrumentedTx
 	if last.number == 0 && !min.Valid {
 		return c, true, nil
 	}
-	// Hold writers only for this transaction so snapshots and the scoped UPDATE see identical rows.
-	if _, e := tx.ExecContext(ctx, "LOCK TABLE "+b.table+" IN SHARE ROW EXCLUSIVE MODE"); e != nil {
-		return c, false, e
-	}
 	op, lower := ">", last.end
 	if last.number == 0 {
 		op, lower = ">=", min.String
 	}
-	q := "SELECT min(k)::text,max(k)::text,count(*) FROM (SELECT " + b.col + " AS k FROM " + b.table + " WHERE " + b.col + op + "$1 AND " + b.col + "<=$2 ORDER BY " + b.col + " LIMIT $3) s"
-	var lo, hi sql.NullString
-	var count int64
-	if e := tx.QueryRowContext(ctx, q, lower, last.max, b.size).Scan(&lo, &hi, &count); e != nil {
+	filter := b.col + op + "$1 AND " + b.col + "<=$2"
+	if b.extraWhere != "" {
+		filter = "(" + filter + ") AND (" + b.extraWhere + ")"
+	}
+	q := "SELECT " + b.col + "::text FROM " + b.table + " WHERE " + filter + " ORDER BY " + b.col + " ASC LIMIT $3 FOR NO KEY UPDATE"
+	rows, e := tx.QueryContext(ctx, q, lower, last.max, b.size)
+	if e != nil {
 		return c, false, e
 	}
+	var lo, hi string
+	var count int64
+	for rows.Next() {
+		var key string
+		if e := rows.Scan(&key); e != nil {
+			rows.Close()
+			return c, false, e
+		}
+		if count == 0 {
+			lo = key
+		}
+		hi = key
+		count++
+	}
+	if e := rows.Err(); e != nil {
+		rows.Close()
+		return c, false, e
+	}
+	rows.Close()
 	if count == 0 {
 		return c, true, nil
 	}
-	c.start, c.end = lo.String, hi.String
+	c.start, c.end = lo, hi
 	if !a.d.IsIrreversible {
-		q = "INSERT INTO _platform_meta.batch_undo_logs(execution_id,batch_number,row_key,before_data) SELECT $1,$2,t." + b.col + "::text,to_jsonb(t) FROM " + b.table + " t WHERE " + b.col + " BETWEEN $3 AND $4"
+		undoFilter := b.col + " BETWEEN $3 AND $4"
+		if b.extraWhere != "" {
+			undoFilter = "(" + undoFilter + ") AND (" + b.extraWhere + ")"
+		}
+		q = "WITH _wbd_undo_src AS (SELECT * FROM " + b.table + " WHERE " + undoFilter + ") " +
+			"INSERT INTO _platform_meta.batch_undo_logs(execution_id,batch_number,row_key,before_data) " +
+			"SELECT $1,$2," + b.col + "::text,to_jsonb(_wbd_undo_src) FROM _wbd_undo_src"
 		if _, e := tx.ExecContext(ctx, q, a.root, c.number, c.start, c.end); e != nil {
 			return c, false, e
 		}
@@ -202,11 +233,16 @@ func (a *attempt) revert(ctx context.Context, b batchSpec) error {
 // Apply the immutable compensating SQL only to captured keys. Fail closed if
 // any row has been changed or deleted since this migration committed.
 func (a *attempt) revertCheckpoint(ctx context.Context, tx *telemetry.InstrumentedTx, b batchSpec, c checkpoint) error {
-	if _, e := tx.ExecContext(ctx, "LOCK TABLE "+b.table+" IN SHARE ROW EXCLUSIVE MODE"); e != nil {
-		return e
+	if c.rows == 0 {
+		return nil
 	}
 	var matched int64
-	q := "SELECT count(*) FROM " + b.table + " AS t JOIN _platform_meta.batch_undo_logs u ON t." + b.col + "::text=u.row_key WHERE u.execution_id=$1 AND u.batch_number=$2 AND t." + b.col + " BETWEEN $3 AND $4 AND u.after_data=to_jsonb(t)"
+	q := "WITH locked AS (" +
+		"SELECT t." + b.col + " FROM " + b.table + " AS t " +
+		"JOIN _platform_meta.batch_undo_logs u ON t." + b.col + "::text=u.row_key " +
+		"WHERE u.execution_id=$1 AND u.batch_number=$2 AND t." + b.col + " BETWEEN $3 AND $4 AND u.after_data=to_jsonb(t) " +
+		"FOR NO KEY UPDATE OF t" +
+		") SELECT count(*) FROM locked"
 	if e := tx.QueryRowContext(ctx, q, a.root, c.number, c.start, c.end).Scan(&matched); e != nil {
 		return e
 	}

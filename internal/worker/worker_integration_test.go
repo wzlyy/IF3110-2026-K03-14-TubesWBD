@@ -462,3 +462,124 @@ func TestWorkerHeldUncertainQueuesAndVerifiesForNextJob(t *testing.T) {
 	f.run(e2, "success")
 	f.sum(88)
 }
+
+func TestWorkerUUIDBatchSelectiveWhereAndRevert(t *testing.T) {
+	f := newFixture(t, "TARGET_PG")
+	uuidTbl := "worker_uuid_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	f.exec(f.target, "CREATE TABLE "+uuidTbl+" (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tag text NOT NULL, v integer NOT NULL)")
+	t.Cleanup(func() {
+		_, _ = f.target.Exec("DROP TABLE IF EXISTS " + uuidTbl)
+	})
+	for _, row := range []struct {
+		tag string
+		v   int
+	}{
+		{"target", 10}, {"target", 10}, {"skip", 5}, {"target", 10}, {"skip", 5},
+	} {
+		f.exec(f.target, "INSERT INTO "+uuidTbl+"(tag, v) VALUES($1, $2)", row.tag, row.v)
+	}
+
+	f.version++
+	defID := uuid.NewString()
+	upSQL := "UPDATE " + uuidTbl + " SET v = v + 1 WHERE " + uuidTbl + ".tag = 'target'"
+	downSQL := "UPDATE " + uuidTbl + " SET v = v - 1 WHERE " + uuidTbl + ".tag = 'target'"
+	f.exec(f.s.DB, `INSERT INTO migration_definitions(id,database_id,version,name,sql_up,sql_down,execution_mode,batch_table,batch_cursor_column,batch_size,created_by)
+ VALUES($1,$2,$3,'uuid_selective',$4,$5,'batch',$6,'id',2,$7)`, defID, f.dbID, f.version, upSQL, downSQL, uuidTbl, f.user)
+
+	upJob := f.request(defID, "batch", "up", "")
+	f.run(upJob, "success")
+
+	var targetSum, skipSum int
+	if err := f.target.QueryRow("SELECT COALESCE(SUM(v) FILTER (WHERE tag='target'),0), COALESCE(SUM(v) FILTER (WHERE tag='skip'),0) FROM "+uuidTbl).Scan(&targetSum, &skipSum); err != nil {
+		t.Fatal(err)
+	}
+	if targetSum != 33 || skipSum != 10 {
+		t.Fatalf("after uuid batch up: targetSum=%d skipSum=%d, want 33 and 10", targetSum, skipSum)
+	}
+	var snap string
+	if err := f.s.DB.QueryRow("SELECT executed_sql_snapshot FROM migration_executions WHERE execution_id=$1", upJob.ExecutionID).Scan(&snap); err != nil {
+		t.Fatal(err)
+	}
+	wantSnap := `UPDATE "` + uuidTbl + `" SET v = v + 1 WHERE ("id" BETWEEN $1 AND $2) AND (` + uuidTbl + `.tag = 'target')`
+	if snap != wantSnap {
+		t.Fatalf("executed_sql_snapshot = %q, want %q", snap, wantSnap)
+	}
+
+	rbJob := f.request(defID, "batch", "rollback", upJob.ExecutionID)
+	f.run(rbJob, "success")
+	if err := f.target.QueryRow("SELECT COALESCE(SUM(v) FILTER (WHERE tag='target'),0), COALESCE(SUM(v) FILTER (WHERE tag='skip'),0) FROM "+uuidTbl).Scan(&targetSum, &skipSum); err != nil {
+		t.Fatal(err)
+	}
+	if targetSum != 30 || skipSum != 10 {
+		t.Fatalf("after uuid batch rollback: targetSum=%d skipSum=%d, want 30 and 10", targetSum, skipSum)
+	}
+
+	var maxTargetUUID string
+	if err := f.target.QueryRow("SELECT id::text FROM " + uuidTbl + " WHERE tag='target' ORDER BY id DESC LIMIT 1").Scan(&maxTargetUUID); err != nil {
+		t.Fatal(err)
+	}
+	f.exec(f.target, "ALTER TABLE "+uuidTbl+" ADD CONSTRAINT stop_last_uuid CHECK(id <> '"+maxTargetUUID+"'::uuid OR v = 10)")
+	fwdJob := f.request(defID, "batch", "forward", "")
+	f.run(fwdJob, "partial")
+	if err := f.target.QueryRow("SELECT COALESCE(SUM(v) FILTER (WHERE tag='target'),0), COALESCE(SUM(v) FILTER (WHERE tag='skip'),0) FROM "+uuidTbl).Scan(&targetSum, &skipSum); err != nil {
+		t.Fatal(err)
+	}
+	if targetSum != 32 || skipSum != 10 {
+		t.Fatalf("after uuid batch partial forward: targetSum=%d skipSum=%d, want 32 and 10", targetSum, skipSum)
+	}
+	f.exec(f.target, "ALTER TABLE "+uuidTbl+" DROP CONSTRAINT stop_last_uuid")
+	revJob := f.request(defID, "batch", "revert_batch", fwdJob.ExecutionID)
+	f.run(revJob, "success")
+	if err := f.target.QueryRow("SELECT COALESCE(SUM(v) FILTER (WHERE tag='target'),0), COALESCE(SUM(v) FILTER (WHERE tag='skip'),0) FROM "+uuidTbl).Scan(&targetSum, &skipSum); err != nil {
+		t.Fatal(err)
+	}
+	if targetSum != 30 || skipSum != 10 {
+		t.Fatalf("after uuid batch revert_batch: targetSum=%d skipSum=%d, want 30 and 10", targetSum, skipSum)
+	}
+}
+
+func TestWorkerNormalStatementTimeout(t *testing.T) {
+	f := newFixture(t, "TARGET_PG")
+	t.Setenv("WORKER_STATEMENT_TIMEOUT_MS", "150")
+	j := f.newJob("normal", "SELECT pg_sleep(1.5)")
+	f.run(j, "failed")
+	var sqlstate sql.NullString
+	if err := f.s.DB.QueryRow("SELECT error_sqlstate FROM migration_executions WHERE execution_id=$1", j.ExecutionID).Scan(&sqlstate); err != nil {
+		t.Fatal(err)
+	}
+	if sqlstate.String != "57014" {
+		t.Fatalf("expected SQLSTATE 57014 for statement_timeout, got %q", sqlstate.String)
+	}
+}
+
+func TestWorkerResumeBatchTransientRetryPreservesPartialLock(t *testing.T) {
+	f := newFixture(t, "TARGET_PG")
+	ctx := context.Background()
+	f.exec(f.target, "ALTER TABLE "+f.table+" ADD CONSTRAINT stop_at_five CHECK(id<>5 OR v=0)")
+	upJob := f.newJob("batch", "UPDATE "+f.table+" SET v=v+1")
+	f.run(upJob, "partial")
+
+	// Inject a transient SQLSTATE 40001 on the remaining rows so resume_batch enters errNextAttempt retry.
+	fnName := "fail_40001_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	f.exec(f.target, "ALTER TABLE "+f.table+" DROP CONSTRAINT stop_at_five")
+	f.exec(f.target, "CREATE FUNCTION "+fnName+"() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'transient conflict' USING ERRCODE = '40001'; END $$")
+	f.exec(f.target, "CREATE TRIGGER "+fnName+"_trg BEFORE UPDATE ON "+f.table+" FOR EACH ROW EXECUTE FUNCTION "+fnName+"()")
+	t.Cleanup(func() {
+		_, _ = f.target.Exec("DROP TRIGGER IF EXISTS " + fnName + "_trg ON " + f.table)
+		_, _ = f.target.Exec("DROP FUNCTION IF EXISTS " + fnName + "()")
+	})
+
+	resumeJob := f.request(upJob.MigrationID, "batch", "resume_batch", upJob.ExecutionID)
+	resumeJob.RetryCount = 0
+	if err := f.s.Process(ctx, resumeJob); !errors.Is(err, errNextAttempt) {
+		t.Fatalf("expected errNextAttempt for transient resume_batch error, got %v", err)
+	}
+	var reqStatus string
+	if err := f.s.DB.QueryRow("SELECT status FROM migration_requests WHERE id=$1", resumeJob.RequestID).Scan(&reqStatus); err != nil || reqStatus != "pending_queue" {
+		t.Fatalf("resume request status = %q err=%v, want pending_queue", reqStatus, err)
+	}
+	li, err := f.s.Locks.GetLock(ctx, f.dbID)
+	if err != nil || li.HoldState != lock.StateHeldPartial || li.ExecutionID != upJob.ExecutionID {
+		t.Fatalf("expected lock restored to held_partial on root %s, got %+v err=%v", upJob.ExecutionID, li, err)
+	}
+}

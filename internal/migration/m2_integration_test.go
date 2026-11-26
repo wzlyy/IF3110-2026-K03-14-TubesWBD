@@ -627,3 +627,199 @@ func TestM2AuthAdminExplorerBatchValidationAndRejectionIntegration(t *testing.T)
 		t.Fatalf("GET /requests did not hydrate approvals as expected: sawSubmitted=%v sawDraft=%v", sawSubmitted, sawDraft)
 	}
 }
+
+func TestM2FixesApprovalsCancelLinearOrderMetricsAndAdminGuards(t *testing.T) {
+	env := setupM2IntegrationEnv(t)
+	ctx := context.Background()
+
+	// 1. Endpoint /metrics di router utama dilindungi admin (401 unauth, 403 non-admin, 200 admin).
+	if rec := env.doJSON(t, http.MethodGet, "/metrics", nil, nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth GET /metrics = %d, want 401", rec.Code)
+	}
+	if rec := env.doJSON(t, http.MethodGet, "/metrics", env.viewerSess, nil); rec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin GET /metrics = %d, want 403", rec.Code)
+	}
+	if rec := env.doJSON(t, http.MethodGet, "/metrics", env.adminSess, nil); rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte("migration_jobs_inflight")) {
+		t.Fatalf("admin GET /metrics = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 2. Urutan linear ActionUp: tidak boleh melompati v1 yang belum dieksekusi ke v2 (409).
+	var mig1, mig2 migration.Definition
+	recM1 := env.doJSON(t, http.MethodPost, "/api/v1/databases/"+env.db1ID+"/migrations", env.editorSess, map[string]any{
+		"name": "m1_first", "sql_up": "CREATE TABLE lin_t1(id INT);", "sql_down": "DROP TABLE lin_t1;",
+	})
+	if recM1.Code != http.StatusCreated {
+		t.Fatalf("create m1 = %d: %s", recM1.Code, recM1.Body.String())
+	}
+	_ = json.Unmarshal(recM1.Body.Bytes(), &mig1)
+
+	recM2 := env.doJSON(t, http.MethodPost, "/api/v1/databases/"+env.db1ID+"/migrations", env.editorSess, map[string]any{
+		"name": "m2_second", "sql_up": "CREATE TABLE lin_t2(id INT);", "sql_down": "DROP TABLE lin_t2;",
+	})
+	if recM2.Code != http.StatusCreated {
+		t.Fatalf("create m2 = %d: %s", recM2.Code, recM2.Body.String())
+	}
+	_ = json.Unmarshal(recM2.Body.Bytes(), &mig2)
+
+	if recSkip := env.doJSON(t, http.MethodPost, "/api/v1/databases/"+env.db1ID+"/requests", env.editorSess, map[string]any{
+		"migration_id": mig2.ID, "action_type": "up",
+	}); recSkip.Code != http.StatusConflict {
+		t.Fatalf("out-of-order up on v2 before v1 = %d, want 409", recSkip.Code)
+	}
+
+	// 3. Stale approvals + bad comment JSON 400 + resubmit (approved_at cleared) + cancel unblocking edit.
+	recReq := env.doJSON(t, http.MethodPost, "/api/v1/databases/"+env.db1ID+"/requests", env.editorSess, map[string]any{
+		"migration_id": mig1.ID, "action_type": "up",
+	})
+	if recReq.Code != http.StatusCreated {
+		t.Fatalf("create req m1 = %d: %s", recReq.Code, recReq.Body.String())
+	}
+	var req migration.RequestDetail
+	_ = json.Unmarshal(recReq.Body.Bytes(), &req)
+
+	recSub := env.doJSON(t, http.MethodPost, "/api/v1/requests/"+req.ID+"/submit", env.editorSess, nil)
+	if recSub.Code != http.StatusOK {
+		t.Fatalf("submit req = %d: %s", recSub.Code, recSub.Body.String())
+	}
+
+	// Malformed JSON comment pada approve harus ditolak 400.
+	badReq := httptest.NewRequest(http.MethodPost, "/api/v1/requests/"+req.ID+"/approve", bytes.NewBufferString(`{"comment":`))
+	badReq.Header.Set("Content-Type", "application/json")
+	badReq.AddCookie(&http.Cookie{Name: auth.CookieSessionName, Value: env.leaderCoreSess.ID})
+	badReq.Header.Set("X-CSRF-Token", env.leaderCoreSess.CSRFToken)
+	badRec := httptest.NewRecorder()
+	env.mux.ServeHTTP(badRec, badReq)
+	if badRec.Code != http.StatusBadRequest {
+		t.Fatalf("malformed approve JSON = %d, want 400", badRec.Code)
+	}
+
+	if rec := env.doJSON(t, http.MethodPost, "/api/v1/requests/"+req.ID+"/approve", env.leaderCoreSess, map[string]string{"comment": "ok1"}); rec.Code != http.StatusOK {
+		t.Fatalf("leader1 approve = %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := env.doJSON(t, http.MethodPost, "/api/v1/requests/"+req.ID+"/approve", env.leaderViewSess, nil); rec.Code != http.StatusOK {
+		t.Fatalf("leader2 approve = %d: %s", rec.Code, rec.Body.String())
+	} else {
+		_ = json.Unmarshal(rec.Body.Bytes(), &req)
+	}
+	if req.Status != migration.ReqStatusApproved || req.ApprovedAt == nil || req.ApprovalStale {
+		t.Fatalf("expected approved non-stale request with ApprovedAt, got %+v", req)
+	}
+
+	// Tambah group ke-3 ("Core, Platform") agar approval menjadi stale & ListUsers diuji koma-spasi.
+	recGrp3 := env.doJSON(t, http.MethodPost, "/api/v1/admin/groups", env.adminSess, map[string]string{
+		"name": "Core, Platform", "leader_user_id": env.leaderCoreID,
+	})
+	if recGrp3.Code != http.StatusCreated {
+		t.Fatalf("create grp3 = %d: %s", recGrp3.Code, recGrp3.Body.String())
+	}
+	var grp3 struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(recGrp3.Body.Bytes(), &grp3)
+	if recGrant := env.doJSON(t, http.MethodPost, "/api/v1/admin/grants", env.adminSess, map[string]string{
+		"group_id": grp3.ID, "database_id": env.db1ID, "access_level": "VIEW_ONLY",
+	}); recGrant.Code != http.StatusOK {
+		t.Fatalf("grant grp3 = %d: %s", recGrant.Code, recGrant.Body.String())
+	}
+
+	recStale := env.doJSON(t, http.MethodGet, "/api/v1/requests/"+req.ID, env.editorSess, nil)
+	_ = json.Unmarshal(recStale.Body.Bytes(), &req)
+	if !req.ApprovalStale {
+		t.Fatal("expected approval_stale=true after new group grant added")
+	}
+	if recEnq := env.doJSON(t, http.MethodPost, "/api/v1/requests/"+req.ID+"/enqueue", env.editorSess, nil); recEnq.Code != http.StatusConflict {
+		t.Fatalf("enqueue stale request = %d, want 409", recEnq.Code)
+	}
+
+	// Resubmit stale approved request -> status pending_review, approved_at nil, 3 approvals.
+	recResub := env.doJSON(t, http.MethodPost, "/api/v1/requests/"+req.ID+"/submit", env.editorSess, nil)
+	if recResub.Code != http.StatusOK {
+		t.Fatalf("resubmit stale req = %d: %s", recResub.Code, recResub.Body.String())
+	}
+	req = migration.RequestDetail{}
+	_ = json.Unmarshal(recResub.Body.Bytes(), &req)
+	if req.Status != migration.ReqStatusPendingReview || req.ApprovedAt != nil || req.ApprovalStale || len(req.Approvals) != 3 {
+		t.Fatalf("unexpected resubmitted req: status=%s approvedAt=%v stale=%v approvals=%d", req.Status, req.ApprovedAt, req.ApprovalStale, len(req.Approvals))
+	}
+
+	// Cancel -> rejected, dan definisi kembali bisa diedit.
+	if recPut := env.doJSON(t, http.MethodPut, "/api/v1/databases/"+env.db1ID+"/migrations/"+mig1.ID, env.editorSess, map[string]any{
+		"name": "m1_edit_blocked", "sql_up": "CREATE TABLE lin_t1(id INT);", "sql_down": "DROP TABLE lin_t1;",
+	}); recPut.Code != http.StatusConflict {
+		t.Fatalf("edit with active request = %d, want 409", recPut.Code)
+	}
+	recCan := env.doJSON(t, http.MethodPost, "/api/v1/requests/"+req.ID+"/cancel", env.editorSess, nil)
+	if recCan.Code != http.StatusOK {
+		t.Fatalf("cancel request = %d: %s", recCan.Code, recCan.Body.String())
+	}
+	req = migration.RequestDetail{}
+	_ = json.Unmarshal(recCan.Body.Bytes(), &req)
+	if req.Status != migration.ReqStatusRejected {
+		t.Fatalf("after cancel status=%s, want rejected", req.Status)
+	}
+	if recPut := env.doJSON(t, http.MethodPut, "/api/v1/databases/"+env.db1ID+"/migrations/"+mig1.ID, env.editorSess, map[string]any{
+		"name": "m1_edited", "sql_up": "CREATE TABLE lin_t1(id INT);", "sql_down": "DROP TABLE lin_t1;",
+	}); recPut.Code != http.StatusOK {
+		t.Fatalf("edit after cancel = %d: %s", recPut.Code, recPut.Body.String())
+	}
+
+	// 4. ActionUp ditolak (422) jika migrasi pernah di-rollback (harus forward).
+	upExec, rbExec := uuid.NewString(), uuid.NewString()
+	now := time.Now().UTC()
+	for _, row := range []struct{ id, act, rev string; off time.Duration }{
+		{upExec, "up", "", 0},
+		{rbExec, "rollback", upExec, time.Second},
+	} {
+		var revArg any
+		if row.rev != "" {
+			revArg = row.rev
+		}
+		if _, err := env.db.ExecContext(ctx, `INSERT INTO migration_executions(
+			execution_id,request_id,job_id,database_id,migration_id,migration_version,migration_revision,migration_name,
+			action_type,reverted_execution_id,executed_by,executed_sql_snapshot,execution_mode,status,started_at,finished_at
+		) VALUES($1,$2,$3,$4,$5,1,1,'m1_edited',$6,$7,$8,'SELECT 1','normal','success',$9,$9)`,
+			row.id, req.ID, uuid.NewString(), env.db1ID, mig1.ID, row.act, revArg, env.editorUserID, now.Add(row.off)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if recUpAfterRb := env.doJSON(t, http.MethodPost, "/api/v1/databases/"+env.db1ID+"/requests", env.editorSess, map[string]any{
+		"migration_id": mig1.ID, "action_type": "up",
+	}); recUpAfterRb.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("ActionUp on rolled-back migration = %d, want 422", recUpAfterRb.Code)
+	}
+
+	// 5. Admin ListUsers json_agg tidak memecah ", " pada nama group, dan toggle safeguards mengembalikan 409.
+	recUsers := env.doJSON(t, http.MethodGet, "/api/v1/admin/users", env.adminSess, nil)
+	if recUsers.Code != http.StatusOK {
+		t.Fatalf("GET /admin/users = %d: %s", recUsers.Code, recUsers.Body.String())
+	}
+	var usersPayload struct {
+		Users []struct {
+			ID     string   `json:"id"`
+			Groups []string `json:"groups"`
+		} `json:"users"`
+	}
+	_ = json.Unmarshal(recUsers.Body.Bytes(), &usersPayload)
+	foundCommaGroup := false
+	for _, u := range usersPayload.Users {
+		if u.ID == env.leaderCoreID {
+			for _, g := range u.Groups {
+				if g == "Core, Platform" {
+					foundCommaGroup = true
+				}
+			}
+		}
+	}
+	if !foundCommaGroup {
+		t.Fatalf("expected group 'Core, Platform' intact in ListUsers payload: %s", recUsers.Body.String())
+	}
+	if rec := env.doJSON(t, http.MethodPost, "/api/v1/admin/users/"+env.adminSess.UserID+"/toggle-active", env.adminSess, nil); rec.Code != http.StatusConflict {
+		t.Fatalf("self deactivate = %d, want 409", rec.Code)
+	}
+	if rec := env.doJSON(t, http.MethodPost, "/api/v1/admin/users/"+env.adminSess.UserID+"/toggle-admin", env.adminSess, nil); rec.Code != http.StatusConflict {
+		t.Fatalf("self/last admin demote = %d, want 409", rec.Code)
+	}
+	if rec := env.doJSON(t, http.MethodPost, "/api/v1/admin/users/"+env.leaderCoreID+"/toggle-active", env.adminSess, nil); rec.Code != http.StatusConflict {
+		t.Fatalf("deactivate active group leader = %d, want 409", rec.Code)
+	}
+}

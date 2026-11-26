@@ -81,8 +81,18 @@ func (a *attempt) finish(ctx context.Context, status string, cause error, restor
 			dur = time.Since(a.started)
 		}
 		telemetry.GlobalMetrics().RecordJobFinished(a.j.ActionType, a.j.ExecutionMode, attemptStatus, dur)
+		version, revision := 0, 0
+		if a.d != nil {
+			version, revision = a.d.Version, a.d.Revision
+		}
 		telemetry.LogAudit(ctx, "worker.finish", attemptStatus,
-			slog.Any("error", msg), slog.Any("sqlstate", state))
+			slog.String("action_type", a.j.ActionType),
+			slog.Int("version", version),
+			slog.Int("revision", revision),
+			slog.String("query", a.snapshot),
+			slog.Any("error", msg),
+			slog.Any("sqlstate", state),
+		)
 	}
 	return e
 }
@@ -362,8 +372,8 @@ func (s *Service) Process(ctx context.Context, j queue.JobMessage) error {
 			}
 			status = verified
 		}
-		if status == "failed" && isTransient(e) && j.RetryCount < queue.MaxTransientRetries && !a.continuation() {
-			if le := a.finish(ctx, "pending_queue", e, false); le != nil {
+		if status == "failed" && isTransient(e) && j.RetryCount < queue.MaxTransientRetries {
+			if le := a.finish(ctx, "pending_queue", e, a.continuation()); le != nil {
 				return le
 			}
 			return errors.Join(errNextAttempt, e)

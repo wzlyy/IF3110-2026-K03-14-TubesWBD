@@ -185,11 +185,11 @@ func TestRegisterRoutesHealthMetricsAndAuthGuard(t *testing.T) {
 		t.Fatalf("GET /api/v1/health = %d %s", recHealth.Code, recHealth.Body.String())
 	}
 
-	// GET /metrics mengembalikan format teks Prometheus 200.
+	// GET /metrics pada router publik :8080 wajib terproteksi (401 tanpa sesi).
 	recMetrics := httptest.NewRecorder()
 	mux.ServeHTTP(recMetrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	if recMetrics.Code != http.StatusOK || !bytes.Contains(recMetrics.Body.Bytes(), []byte("migration_jobs_inflight")) {
-		t.Fatalf("GET /metrics = %d %s", recMetrics.Code, recMetrics.Body.String())
+	if recMetrics.Code != http.StatusUnauthorized {
+		t.Fatalf("GET /metrics without cookie = %d, want 401", recMetrics.Code)
 	}
 
 	// Endpoint API tanpa autentikasi mengembalikan JSON 401, bukan redirect HTML 303.
@@ -197,6 +197,7 @@ func TestRegisterRoutesHealthMetricsAndAuthGuard(t *testing.T) {
 		{http.MethodGet, "/api/v1/auth/me"},
 		{http.MethodGet, "/api/v1/databases"},
 		{http.MethodGet, "/api/v1/requests"},
+		{http.MethodPost, "/api/v1/requests/req-1/cancel"},
 		{http.MethodPost, "/api/v1/requests/req-1/enqueue"},
 		{http.MethodGet, "/api/v1/admin/groups"},
 	} {
@@ -219,5 +220,28 @@ func TestSeedSQLBcryptHashMatchesDevPass(t *testing.T) {
 	}
 	if err := auth.CheckPassword(expectedHash, "DevPass!2026"); err != nil {
 		t.Fatalf("seed_m2.sql hash does not match DevPass!2026: %v", err)
+	}
+}
+
+func TestDecodeOptionalJSONAllowsEmptyRejectsMalformed(t *testing.T) {
+	var body struct {
+		Comment string `json:"comment"`
+	}
+	rEmpty := httptest.NewRequest(http.MethodPost, "/approve", bytes.NewReader(nil))
+	if err := DecodeOptionalJSON(httptest.NewRecorder(), rEmpty, 1024, &body); err != nil {
+		t.Fatalf("empty body unexpected err: %v", err)
+	}
+	rChunkedEOF := httptest.NewRequest(http.MethodPost, "/approve", bytes.NewBufferString(""))
+	rChunkedEOF.ContentLength = -1
+	if err := DecodeOptionalJSON(httptest.NewRecorder(), rChunkedEOF, 1024, &body); err != nil {
+		t.Fatalf("empty chunked body unexpected err: %v", err)
+	}
+	rValid := httptest.NewRequest(http.MethodPost, "/approve", bytes.NewBufferString(`{"comment":"ok"}`))
+	if err := DecodeOptionalJSON(httptest.NewRecorder(), rValid, 1024, &body); err != nil || body.Comment != "ok" {
+		t.Fatalf("valid optional json err=%v body=%+v", err, body)
+	}
+	rBad := httptest.NewRequest(http.MethodPost, "/approve", bytes.NewBufferString(`{"comment":`))
+	if err := DecodeOptionalJSON(httptest.NewRecorder(), rBad, 1024, &body); err == nil {
+		t.Fatal("expected error for malformed optional json")
 	}
 }

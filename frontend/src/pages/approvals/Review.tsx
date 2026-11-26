@@ -31,6 +31,7 @@ export function Queue() {
           <p>
             {r.database_name} · v{r.migration_version} · {r.action_type} ·{" "}
             <strong>{r.status}</strong>
+            {r.approval_stale ? " · approval kedaluwarsa" : ""}
           </p>
           <p>Diajukan oleh {r.requested_by_username}</p>
         </article>
@@ -84,6 +85,11 @@ export function Review() {
             <p>
               {r.database_name} · Diajukan oleh {r.requested_by_username}
             </p>
+            {r.approval_stale && (
+              <p className="m2-error" role="alert">
+                Persetujuan tidak lagi valid karena perubahan grant database atau leader grup. Ajukan ulang tinjauan atau batalkan permintaan ini.
+              </p>
+            )}
             {r.target_execution_id && (
               <p>
                 Eksekusi sasaran <code>{r.target_execution_id}</code>
@@ -132,15 +138,20 @@ export function Review() {
               </label>
             )}
             <div className="m2-actions">
-              {r.status === "draft" && canEdit && (
-                <button disabled={action.busy} onClick={() => submit("submit")}>
-                  Ajukan tinjauan
-                </button>
-              )}
+              {canEdit &&
+                (r.status === "draft" ||
+                  ((r.status === "pending_review" || r.status === "approved") &&
+                    r.approval_stale)) && (
+                  <button disabled={action.busy} onClick={() => submit("submit")}>
+                    {r.status === "draft"
+                      ? "Ajukan tinjauan"
+                      : "Ajukan ulang tinjauan"}
+                  </button>
+                )}
               {canDecide && (
                 <>
                   <button
-                    disabled={action.busy}
+                    disabled={action.busy || Boolean(r.approval_stale)}
                     onClick={() => submit("approve")}
                   >
                     Setujui
@@ -155,12 +166,21 @@ export function Review() {
               )}
               {r.status === "approved" && canEdit && (
                 <button
-                  disabled={action.busy}
+                  disabled={action.busy || Boolean(r.approval_stale)}
                   onClick={() => submit("enqueue")}
                 >
                   Masukkan ke antrean eksekusi
                 </button>
               )}
+              {canEdit &&
+                ["draft", "pending_review", "approved"].includes(r.status) && (
+                  <button
+                    disabled={action.busy}
+                    onClick={() => submit("cancel")}
+                  >
+                    Batalkan permintaan
+                  </button>
+                )}
               {r.job_id && <Link to={"/jobs/" + r.job_id}>Pantau job</Link>}
               <button disabled={action.busy} onClick={refresh}>
                 Segarkan status

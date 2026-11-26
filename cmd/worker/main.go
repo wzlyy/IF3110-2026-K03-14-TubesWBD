@@ -38,6 +38,10 @@ func run() error {
 		defer cancel()
 		shutdown(flush)
 	}()
+	telemetry.LogAudit(ctx, "worker.startup", "starting",
+		slog.String("service", srv),
+		slog.String("worker_id", cfg.WorkerID),
+	)
 	db, e := database.NewPlatformDB(cfg)
 	if e != nil {
 		return e
@@ -58,6 +62,7 @@ func run() error {
 		addr = ":" + cfg.MetricsPort
 	}
 	telemetry.StartMetricsServer(ctx, addr, metrics)
+	telemetry.LogAudit(ctx, "worker.metrics.listen", "ok", slog.String("addr", addr))
 	concurrency := 4
 	if v := os.Getenv("WORKER_CONCURRENCY"); v != "" {
 		concurrency, e = strconv.Atoi(v)
@@ -65,13 +70,19 @@ func run() error {
 			return errors.New("WORKER_CONCURRENCY must be positive")
 		}
 	}
+	telemetry.LogAudit(ctx, "worker.listen", "ok",
+		slog.String("worker_id", cfg.WorkerID),
+		slog.Int("concurrency", concurrency),
+	)
 	svc := worker.Service{DB: db, Targets: targets, Locks: lock.NewManager(db), WorkerID: cfg.WorkerID}
 	return svc.Run(ctx, cfg.RabbitMQURL, concurrency)
 }
 
 func main() {
 	if e := run(); e != nil {
-		slog.Error("worker stopped", "error", e)
+		telemetry.LogEvent(context.Background(), slog.LevelError, "worker.stop", "error",
+			slog.String("error", telemetry.RedactString(e.Error())),
+		)
 		os.Exit(1)
 	}
 }

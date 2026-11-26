@@ -11,7 +11,7 @@ import (
 // Non-admin users are strictly denied with HTTP 403 Forbidden.
 func RequireAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		isAPI := strings.HasPrefix(r.URL.Path, "/api/")
+		isAPI := strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/metrics"
 		user := auth.GetUserFromContext(r.Context())
 		if user == nil {
 			if isAPI {

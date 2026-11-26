@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"log/slog"
 	"time"
 
@@ -108,6 +107,11 @@ func (a *attempt) load(ctx context.Context) error {
 			}
 		}
 	}
+	if j.ExecutionMode == migration.ModeBatch {
+		if plan, perr := migration.ParseBatchUpdateSQL(a.snapshot, a.d.BatchTable, a.d.BatchCursorColumn); perr == nil {
+			a.snapshot = plan.Statement
+		}
+	}
 	return nil
 }
 
@@ -123,7 +127,10 @@ func (a *attempt) validate(ctx context.Context) error {
 	return migration.VerifyCurrentApprovals(ctx, a.s.DB, j.RequestID, j.DatabaseID)
 }
 
-var errInvalidJob = errors.New("delivery does not match queued request")
+var (
+	errInvalidJob      = errors.New("delivery does not match queued request")
+	errRevisionChanged = errors.New("definition revision changed before execution")
+)
 
 func (a *attempt) record(ctx context.Context, status string, cause error) error {
 	j := a.j
@@ -138,8 +145,20 @@ func (a *attempt) record(ctx context.Context, status string, cause error) error 
 		return e
 	}
 	n, e := res.RowsAffected()
-	if e != nil || n != 1 {
-		return fmt.Errorf("definition revision changed before execution")
+	if e != nil {
+		return e
+	}
+	if n != 1 {
+		if _, ue := tx.ExecContext(ctx, "UPDATE migration_requests SET status='failed',updated_at=now() WHERE id=$1 AND job_id=$2 AND status IN ('pending_queue','running')", j.RequestID, j.JobID); ue != nil {
+			return ue
+		}
+		if ce := tx.Commit(); ce != nil {
+			return ce
+		}
+		telemetry.LogAudit(ctx, "worker.attempt", "failed",
+			slog.String("action_type", j.ActionType), slog.Int("version", a.d.Version),
+			slog.Int("revision", a.d.Revision), slog.String("error", errRevisionChanged.Error()))
+		return errRevisionChanged
 	}
 	traceID, _ := telemetry.TraceIDsFromContext(ctx)
 	var parent, reverted, msg, state any

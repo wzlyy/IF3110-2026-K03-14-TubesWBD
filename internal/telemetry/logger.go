@@ -48,6 +48,11 @@ func newJSONLogger(w io.Writer) *slog.Logger {
 			if a.Value.Kind() == slog.KindString {
 				return slog.String(a.Key, RedactString(a.Value.String()))
 			}
+			if a.Value.Kind() == slog.KindAny {
+				if err, ok := a.Value.Any().(error); ok && err != nil {
+					return slog.String(a.Key, SanitizeLogString(RedactString(err.Error())))
+				}
+			}
 			return a
 		},
 	}

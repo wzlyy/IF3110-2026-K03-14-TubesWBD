@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -24,19 +23,28 @@ func registerFrontend(mux *http.ServeMux, distDir string) {
 	mux.Handle("GET /", api.NewSPAHandler(distDir))
 }
 
+func fatalStartup(event string, err error) {
+	msg := ""
+	if err != nil {
+		msg = telemetry.RedactString(err.Error())
+	}
+	telemetry.LogEvent(context.Background(), slog.LevelError, event, "error", slog.String("error", msg))
+	os.Exit(1)
+}
+
 func main() {
 	telemetry.InitLogger(os.Stdout)
 
 	// 1. Load configuration
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("[FATAL] Configuration load failed: %v", err)
+		fatalStartup("config.load", err)
 	}
 
 	// 1b. Inisialisasi TracerProvider OpenTelemetry (stdout bawaan atau OTLP Collector)
 	_, shutdownTracer, err := telemetry.InitTracer(context.Background(), cfg.OTelServiceName, cfg.OTelOTLPEndpoint, os.Stdout)
 	if err != nil {
-		log.Fatalf("[FATAL] Telemetry tracer initialization failed: %v", err)
+		fatalStartup("telemetry.init", err)
 	}
 	defer func() {
 		sCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -52,7 +60,7 @@ func main() {
 	// 2. Connect to platform database
 	db, err := database.NewPlatformDB(cfg)
 	if err != nil {
-		log.Fatalf("[FATAL] Platform database connection failed: %v", err)
+		fatalStartup("platform_db.connect", err)
 	}
 	defer db.Close()
 
@@ -60,18 +68,18 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := database.MigratePlatformDB(ctx, db); err != nil {
-		log.Fatalf("[FATAL] Database migration failed: %v", err)
+		fatalStartup("platform_db.migrate", err)
 	}
 
 	// 4. Seed initial Platform Admin account if empty
 	if err := auth.BootstrapPlatformAdmin(ctx, db, cfg.AdminInitialUsername, cfg.AdminInitialPassword); err != nil {
-		log.Fatalf("[FATAL] Platform admin bootstrap failed: %v", err)
+		fatalStartup("platform_admin.bootstrap", err)
 	}
 
 	// 5. Inisialisasi koneksi target, distributed lock, publisher RabbitMQ, dan metrik pool Prometheus
 	connectionStore, err := database.NewConnectionStore(db, cfg.EncryptionKey)
 	if err != nil {
-		log.Fatalf("[FATAL] Credential encryption initialization failed: %v", err)
+		fatalStartup("credentials.init", err)
 	}
 	targetManager := database.NewTargetManager(connectionStore)
 	defer targetManager.Close()
@@ -109,6 +117,19 @@ func main() {
 
 	registerFrontend(mux, cfg.SPADistDir)
 
+	srvCtx, srvCancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer srvCancel()
+
+	if cfg.MetricsPort != "" && cfg.MetricsPort != cfg.Port {
+		metricsSrv := telemetry.StartMetricsServer(srvCtx, ":"+cfg.MetricsPort, metrics)
+		defer func() {
+			sCtx, sCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer sCancel()
+			_ = metricsSrv.Shutdown(sCtx)
+		}()
+		telemetry.LogAudit(context.Background(), "metrics.listen", "ok", slog.String("addr", ":"+cfg.MetricsPort))
+	}
+
 	// 8. Jalankan server HTTP dengan middleware OTel dan shutdown teratur
 	addr := ":" + cfg.Port
 	srv := &http.Server{
@@ -123,19 +144,17 @@ func main() {
 	go func() {
 		telemetry.LogAudit(context.Background(), "server.listen", "ok", slog.String("addr", addr))
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("[FATAL] Server listen error: %v", err)
+			fatalStartup("server.listen", err)
 		}
 	}()
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	<-stop
+	<-srvCtx.Done()
 
 	telemetry.LogAudit(context.Background(), "server.shutdown", "starting")
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		telemetry.LogAudit(context.Background(), "server.shutdown", "error", slog.String("error", err.Error()))
+		telemetry.LogAudit(context.Background(), "server.shutdown", "error", slog.String("error", telemetry.RedactString(err.Error())))
 	}
 	telemetry.LogAudit(context.Background(), "server.shutdown", "ok")
 }

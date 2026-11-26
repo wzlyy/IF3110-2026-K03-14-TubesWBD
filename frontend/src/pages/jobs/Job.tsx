@@ -23,7 +23,13 @@ interface Job {
   can_revert_batch: boolean;
 }
 const active = (job: Job) =>
-  ["pending_queue", "running"].includes(job.request_status);
+  ["pending_queue", "running", "uncertain"].includes(job.request_status);
+const terminalStageLabel: Record<string, string> = {
+  failed: "Gagal",
+  partial: "Parsial",
+  partially_reverted: "Direvert sebagian",
+  uncertain: "Rekonsiliasi",
+};
 // Cursor coverage is measurable even when the target has gaps between keys.
 function cursorProgress(batches: Batch[] = []) {
   const first = batches[0],
@@ -76,6 +82,7 @@ export default function JobPage() {
             <Link to={dbPath(j.database_id) + "/history"}>
               Riwayat eksekusi
             </Link>
+            <button onClick={refresh}>Segarkan status</button>
           </div>
           <article className="m2-panel">
             <h2>{e?.migration_name ?? j.action_type}</h2>
@@ -89,7 +96,7 @@ export default function JobPage() {
                 "Disetujui",
                 "Antrean",
                 "Berjalan",
-                "Selesai",
+                terminalStageLabel[j.request_status] ?? "Selesai",
               ].map((label, i) => (
                 <li key={label} aria-current={i === stage ? "step" : undefined}>
                   {label}

@@ -78,10 +78,10 @@ type ValidationReport struct {
 }
 
 var (
-	batchIdentRe  = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
-	batchUpdateRe = regexp.MustCompile(`(?is)^UPDATE\s+([a-zA-Z_][\w]*(?:\.[a-zA-Z_][\w]*)?)\s+SET\s+(.+)$`)
-	batchWhereRe  = regexp.MustCompile(`(?i)\s+WHERE\s+`)
-	indexWhereRe  = regexp.MustCompile(`(?i)\bWHERE\b`)
+	batchIdentRe      = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+	batchUpdateRe     = regexp.MustCompile(`(?is)^UPDATE\s+((?:"[a-zA-Z_][a-zA-Z0-9_]*"|[a-zA-Z_][a-zA-Z0-9_]*)(?:\s*\.\s*(?:"[a-zA-Z_][a-zA-Z0-9_]*"|[a-zA-Z_][a-zA-Z0-9_]*))?)\s+SET\s+(.+)$`)
+	indexWhereRe      = regexp.MustCompile(`(?i)\bWHERE\b`)
+	positionalParamRe = regexp.MustCompile(`\$(?:[1-9][0-9]*|0)`)
 )
 
 // maskSQL replaces SQL string literals (and optionally double-quoted identifiers)
@@ -237,60 +237,299 @@ func stripLeadingSQLComments(s string) string {
 	return strings.TrimSpace(s)
 }
 
-// BuildBatchUpdateSQL memvalidasi satu statement UPDATE mode batch serta aturan cursor BETWEEN $1 AND $2
-// agar validasi API/dry-run selaras penuh dengan eksekutor worker, lalu mengembalikan identifier dan SQL tersanitasi.
-func BuildBatchUpdateSQL(query, batchTable, cursorCol string) (sanitizedTable, sanitizedCol, statement string, err error) {
+// BatchQueryPlan menyimpan identifier tersanitasi, predikat WHERE tambahan (jika ada),
+// serta statement UPDATE terkanonisasi dengan filter cursor BETWEEN $1 AND $2.
+type BatchQueryPlan struct {
+	Table      string
+	Column     string
+	ExtraWhere string
+	Statement  string
+}
+
+func stripSQLCommentsOutsideLiterals(s string) (string, error) {
+	var out strings.Builder
+	out.Grow(len(s))
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c == '-' && i+1 < len(s) && s[i+1] == '-' {
+			end := strings.IndexByte(s[i:], '\n')
+			if end < 0 {
+				i = len(s)
+			} else {
+				i += end + 1
+			}
+			out.WriteByte(' ')
+			continue
+		}
+		if c == '/' && i+1 < len(s) && s[i+1] == '*' {
+			i += 2
+			depth := 1
+			for i < len(s) && depth > 0 {
+				if i+1 < len(s) && s[i:i+2] == "/*" {
+					depth++
+					i += 2
+				} else if i+1 < len(s) && s[i:i+2] == "*/" {
+					depth--
+					i += 2
+				} else {
+					i++
+				}
+			}
+			if depth != 0 {
+				return "", errors.New("unterminated block comment in batch SQL")
+			}
+			out.WriteByte(' ')
+			continue
+		}
+		if c == '\'' || c == '"' {
+			start := i
+			quote := c
+			backslash := quote == '\'' && i > 0 && (s[i-1] == 'e' || s[i-1] == 'E') && (i < 2 || !isIdentifier(s[i-2]))
+			i++
+			for i < len(s) {
+				if s[i] == '\\' && backslash {
+					if i+1 < len(s) {
+						i += 2
+					} else {
+						i++
+					}
+					continue
+				}
+				if s[i] == quote {
+					if i+1 < len(s) && s[i+1] == quote {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+			out.WriteString(s[start:i])
+			continue
+		}
+		if c == '$' {
+			j := i + 1
+			for j < len(s) && isIdentifier(s[j]) && s[j] != '$' {
+				j++
+			}
+			if j < len(s) && s[j] == '$' && (j == i+1 || s[i+1] < '0' || s[i+1] > '9') {
+				tag := s[i : j+1]
+				if end := strings.Index(s[j+1:], tag); end >= 0 {
+					endIdx := j + 1 + end + len(tag)
+					out.WriteString(s[i:endIdx])
+					i = endIdx
+					continue
+				}
+			}
+		}
+		out.WriteByte(c)
+		i++
+	}
+	return strings.TrimSpace(out.String()), nil
+}
+
+func isSQLSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '\f' || b == '\v'
+}
+
+func findTopLevelSQLKeyword(masked, kw string) int {
+	depth := 0
+	n := len(kw)
+	for i := 0; i < len(masked); i++ {
+		switch masked[i] {
+		case '(':
+			depth++
+			continue
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+			continue
+		}
+		if depth != 0 || i+n > len(masked) {
+			continue
+		}
+		if (i > 0 && !isSQLSpace(masked[i-1]) && masked[i-1] != ')') ||
+			(i+n < len(masked) && !isSQLSpace(masked[i+n]) && masked[i+n] != '(') {
+			continue
+		}
+		if strings.EqualFold(masked[i:i+n], kw) {
+			return i
+		}
+	}
+	return -1
+}
+
+func normalizeBatchTableToken(tok string) string {
+	parts := strings.Split(tok, ".")
+	for i, p := range parts {
+		p = strings.TrimSpace(p)
+		if len(p) >= 2 && p[0] == '"' && p[len(p)-1] == '"' {
+			p = p[1 : len(p)-1]
+		}
+		parts[i] = p
+	}
+	return strings.Join(parts, ".")
+}
+
+func hasBalancedParens(masked string) bool {
+	depth := 0
+	for i := 0; i < len(masked); i++ {
+		switch masked[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth < 0 {
+				return false
+			}
+		}
+	}
+	return depth == 0
+}
+
+func unwrapBalancedOuterParens(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) < 2 || s[0] != '(' || s[len(s)-1] != ')' {
+		return s
+	}
+	masked := maskSQLStringLiterals(s)
+	depth := 0
+	for i := 0; i < len(masked); i++ {
+		switch masked[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 && i < len(masked)-1 {
+				return s
+			}
+		}
+	}
+	if depth == 0 {
+		return strings.TrimSpace(s[1 : len(s)-1])
+	}
+	return s
+}
+
+// ParseBatchUpdateSQL memvalidasi satu statement UPDATE mode batch, mengizinkan komentar SQL,
+// identifier bertanda petik ganda, serta predikat WHERE selektif opsional, lalu menyusun BatchQueryPlan.
+func ParseBatchUpdateSQL(query, batchTable, cursorCol string) (BatchQueryPlan, error) {
+	var plan BatchQueryPlan
 	batchTable = strings.TrimSpace(batchTable)
 	cursorCol = strings.TrimSpace(cursorCol)
 	names := strings.Split(batchTable, ".")
 	if len(names) == 0 || len(names) > 2 {
-		return "", "", "", errors.New("invalid batch table")
+		return plan, errors.New("invalid batch table")
 	}
 	for _, n := range append(append([]string{}, names...), cursorCol) {
 		if !batchIdentRe.MatchString(n) {
-			return "", "", "", errors.New("invalid batch identifier")
+			return plan, errors.New("invalid batch identifier")
 		}
 	}
-	sanitizedTable = pgx.Identifier(names).Sanitize()
-	sanitizedCol = pgx.Identifier{cursorCol}.Sanitize()
+	plan.Table = pgx.Identifier(names).Sanitize()
+	plan.Column = pgx.Identifier{cursorCol}.Sanitize()
 
 	stmts, err := ValidateSQL("postgres", query)
 	if err != nil {
-		return "", "", "", err
+		return plan, err
 	}
 	if len(stmts) != 1 {
-		return "", "", "", errors.New("batch requires one UPDATE")
+		return plan, errors.New("batch requires one UPDATE")
 	}
 
-	cleanSQL := stripLeadingSQLComments(stmts[0].SQL)
-	match := batchUpdateRe.FindStringSubmatch(cleanSQL)
-	if len(match) != 3 || !(strings.EqualFold(match[1], batchTable) || strings.EqualFold("public."+match[1], batchTable) || strings.EqualFold(match[1], "public."+batchTable)) {
-		return "", "", "", errors.New("batch UPDATE must target configured table")
+	cleanSQL, err := stripSQLCommentsOutsideLiterals(stripLeadingSQLComments(stmts[0].SQL))
+	if err != nil {
+		return plan, err
 	}
+	match := batchUpdateRe.FindStringSubmatch(cleanSQL)
+	if len(match) != 3 {
+		return plan, errors.New("batch requires an UPDATE ... SET statement")
+	}
+	targetTok := normalizeBatchTableToken(match[1])
+	if !(strings.EqualFold(targetTok, batchTable) || strings.EqualFold("public."+targetTok, batchTable) || strings.EqualFold(targetTok, "public."+batchTable)) {
+		return plan, errors.New("batch UPDATE must target configured table")
+	}
+
 	rawRest := match[2]
 	maskedRest := maskSQLStringLiterals(rawRest)
-	whereLocs := batchWhereRe.FindAllStringIndex(maskedRest, -1)
-	if len(whereLocs) > 1 {
-		return "", "", "", errors.New("unsupported nested WHERE in batch UPDATE")
-	}
+	whereIdx := findTopLevelSQLKeyword(maskedRest, "WHERE")
 	setRaw, setMasked := rawRest, maskedRest
-	if len(whereLocs) == 1 {
-		whereClause := rawRest[whereLocs[0][1]:]
-		if !regexp.MustCompile(`(?i)^\s*` + regexp.QuoteMeta(cursorCol) + `\s+BETWEEN\s+\$1\s+AND\s+\$2\s*$`).MatchString(whereClause) {
-			return "", "", "", errors.New("batch WHERE must use cursor BETWEEN $1 AND $2")
+	var extraWhere string
+
+	if whereIdx >= 0 {
+		setRaw = rawRest[:whereIdx]
+		setMasked = maskedRest[:whereIdx]
+		rawWhere := strings.TrimSpace(rawRest[whereIdx+len("WHERE"):])
+		maskedWhere := strings.TrimSpace(maskedRest[whereIdx+len("WHERE"):])
+		if rawWhere == "" {
+			return plan, errors.New("batch WHERE clause cannot be empty")
 		}
-		setRaw = rawRest[:whereLocs[0][0]]
-		setMasked = maskedRest[:whereLocs[0][0]]
+		if findTopLevelSQLKeyword(maskedWhere, "RETURNING") >= 0 {
+			return plan, errors.New("unsupported RETURNING clause in batch UPDATE")
+		}
+		colPat := `(?:` + regexp.QuoteMeta(plan.Column) + `|\b` + regexp.QuoteMeta(cursorCol) + `\b)`
+		cursorOnlyRe := regexp.MustCompile(`(?is)^\s*(?:\(\s*` + colPat + `\s+BETWEEN\s+\$1\s+AND\s+\$2\s*\)|` + colPat + `\s+BETWEEN\s+\$1\s+AND\s+\$2)\s*$`)
+		wrappedAndRe := regexp.MustCompile(`(?is)^\s*\(\s*` + colPat + `\s+BETWEEN\s+\$1\s+AND\s+\$2\s*\)\s+AND\s+(.+)$`)
+		bareAndRe := regexp.MustCompile(`(?is)^\s*` + colPat + `\s+BETWEEN\s+\$1\s+AND\s+\$2\s+AND\s+(.+)$`)
+
+		if cursorOnlyRe.MatchString(maskedWhere) {
+			extraWhere = ""
+		} else if m := wrappedAndRe.FindStringSubmatch(rawWhere); len(m) == 2 {
+			tail := strings.TrimSpace(m[1])
+			if findTopLevelSQLKeyword(maskSQLStringLiterals(tail), "OR") >= 0 {
+				return plan, errors.New("batch WHERE with cursor must parenthesize boolean predicates")
+			}
+			extraWhere = unwrapBalancedOuterParens(tail)
+		} else if m := bareAndRe.FindStringSubmatch(rawWhere); len(m) == 2 {
+			tail := strings.TrimSpace(m[1])
+			if findTopLevelSQLKeyword(maskSQLStringLiterals(tail), "OR") >= 0 {
+				return plan, errors.New("batch WHERE with cursor must parenthesize boolean predicates")
+			}
+			extraWhere = unwrapBalancedOuterParens(tail)
+		} else {
+			extraWhere = unwrapBalancedOuterParens(rawWhere)
+		}
+		if extraWhere != "" {
+			maskedExtra := maskSQLStringLiterals(extraWhere)
+			if !hasBalancedParens(maskedExtra) {
+				return plan, errors.New("unbalanced parentheses in batch WHERE")
+			}
+			if positionalParamRe.MatchString(maskedExtra) {
+				return plan, errors.New("batch WHERE predicate cannot contain positional parameters")
+			}
+		}
 	}
-	if strings.Contains(setMasked, "--") || strings.Contains(setMasked, "/*") || regexp.MustCompile(`(?i)\b(FROM|RETURNING)\b`).MatchString(setMasked) {
-		return "", "", "", errors.New("unsupported batch UPDATE clause")
+
+	if findTopLevelSQLKeyword(setMasked, "FROM") >= 0 || findTopLevelSQLKeyword(setMasked, "RETURNING") >= 0 {
+		return plan, errors.New("unsupported batch UPDATE clause")
+	}
+	if positionalParamRe.MatchString(setMasked) {
+		return plan, errors.New("batch SET cannot contain positional parameters")
 	}
 	// Batch statements cannot change the key used for streaming and undo.
 	if regexp.MustCompile(`(?i)(^|,)\s*"?`+regexp.QuoteMeta(cursorCol)+`"?\s*=`).MatchString(setMasked) || strings.HasPrefix(strings.TrimSpace(setMasked), "(") {
-		return "", "", "", errors.New("batch cursor must remain immutable")
+		return plan, errors.New("batch cursor must remain immutable")
 	}
-	statement = "UPDATE " + sanitizedTable + " SET " + strings.TrimSpace(setRaw) + " WHERE " + sanitizedCol + " BETWEEN $1 AND $2"
-	return sanitizedTable, sanitizedCol, statement, nil
+
+	plan.ExtraWhere = extraWhere
+	if extraWhere != "" {
+		plan.Statement = "UPDATE " + plan.Table + " SET " + strings.TrimSpace(setRaw) + " WHERE (" + plan.Column + " BETWEEN $1 AND $2) AND (" + extraWhere + ")"
+	} else {
+		plan.Statement = "UPDATE " + plan.Table + " SET " + strings.TrimSpace(setRaw) + " WHERE " + plan.Column + " BETWEEN $1 AND $2"
+	}
+	return plan, nil
+}
+
+// BuildBatchUpdateSQL memvalidasi satu statement UPDATE mode batch serta aturan cursor BETWEEN $1 AND $2
+// agar validasi API/dry-run selaras penuh dengan eksekutor worker, lalu mengembalikan identifier dan SQL tersanitasi.
+func BuildBatchUpdateSQL(query, batchTable, cursorCol string) (sanitizedTable, sanitizedCol, statement string, err error) {
+	plan, err := ParseBatchUpdateSQL(query, batchTable, cursorCol)
+	if err != nil {
+		return "", "", "", err
+	}
+	return plan.Table, plan.Column, plan.Statement, nil
 }
 
 // ValidateDefinitionInput memvalidasi struktur dan SQL pada definisi migrasi.

@@ -325,9 +325,9 @@ func (h *M2APIHandler) decideRequest(w http.ResponseWriter, r *http.Request, dec
 	var body struct {
 		Comment string `json:"comment"`
 	}
-	// Body opsional untuk persetujuan; abaikan EOF kosong dengan aman.
-	if r.Body != nil && r.ContentLength != 0 {
-		_ = DecodeJSON(w, r, 8*1024, &body)
+	if err := DecodeOptionalJSON(w, r, 8*1024, &body); err != nil {
+		WriteError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	existing, err := migration.GetRequestDetail(r.Context(), h.DB, reqID)
@@ -365,6 +365,25 @@ func (h *M2APIHandler) EnqueueRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	WriteJSON(w, http.StatusAccepted, res)
+}
+
+func (h *M2APIHandler) CancelRequest(w http.ResponseWriter, r *http.Request) {
+	reqID := r.PathValue("request_id")
+	existing, err := migration.GetRequestDetail(r.Context(), h.DB, reqID)
+	if err != nil {
+		HandleDomainError(w, err)
+		return
+	}
+	user, _, ctx, ok := h.requireDBAccess(w, r, existing.DatabaseID, access.AccessViewEdit)
+	if !ok {
+		return
+	}
+	detail, err := migration.CancelRequest(ctx, h.DB, reqID, user.ID)
+	if err != nil {
+		HandleDomainError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, detail)
 }
 
 // --- Riwayat (+ Hide rollback) dan Pemantauan Job/Eksekusi ---

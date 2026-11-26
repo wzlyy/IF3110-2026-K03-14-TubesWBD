@@ -64,8 +64,18 @@ func SubmitRequestForReview(ctx context.Context, db *sql.DB, requestID, actorUse
 		}
 		return nil, err
 	}
-	if status != ReqStatusDraft {
-		return nil, fmt.Errorf("%w: hanya request berstatus 'draft' yang dapat diajukan ke review", ErrInvalidStateChange)
+	stale, err := IsRequestApprovalStale(ctx, tx, requestID, databaseID, status)
+	if err != nil {
+		return nil, err
+	}
+	switch status {
+	case ReqStatusDraft:
+	case ReqStatusPendingReview, ReqStatusApproved:
+		if !stale {
+			return nil, fmt.Errorf("%w: hanya request berstatus 'draft' atau approval yang kedaluwarsa yang dapat diajukan ke review", ErrInvalidStateChange)
+		}
+	default:
+		return nil, fmt.Errorf("%w: hanya request berstatus 'draft' atau approval yang kedaluwarsa yang dapat diajukan ke review", ErrInvalidStateChange)
 	}
 
 	rows, err := tx.QueryContext(ctx, `
@@ -129,6 +139,7 @@ func SubmitRequestForReview(ctx context.Context, db *sql.DB, requestID, actorUse
 		UPDATE migration_requests
 		SET status = 'pending_review',
 		    submitted_at = CURRENT_TIMESTAMP,
+		    approved_at = NULL,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1
 	`, requestID); err != nil {
@@ -179,6 +190,15 @@ func DecideApproval(ctx context.Context, db *sql.DB, requestID, actorUserID, dec
 	}
 	if reqStatus != ReqStatusPendingReview {
 		return nil, fmt.Errorf("%w: approval hanya dapat diberikan pada status 'pending_review'", ErrInvalidStateChange)
+	}
+	if decision == DecisionApproved {
+		stale, err := IsRequestApprovalStale(ctx, tx, requestID, databaseID, reqStatus)
+		if err != nil {
+			return nil, err
+		}
+		if stale {
+			return nil, ErrApprovalStale
+		}
 	}
 
 	res, err := tx.ExecContext(ctx, `
@@ -263,9 +283,7 @@ type DBQuerier interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-// VerifyCurrentApprovals memastikan setiap grup berakses VIEW_ONLY/VIEW_EDIT pada databaseID
-// memiliki leader aktif dan baris persetujuan 'approved' dari leader tersebut (untuk API dan Worker).
-func VerifyCurrentApprovals(ctx context.Context, db DBQuerier, requestID, databaseID string) error {
+func evaluateApprovalSnapshot(ctx context.Context, db DBQuerier, requestID, databaseID string, requireApproved bool) error {
 	rows, err := db.QueryContext(ctx, `
 		SELECT g.id, g.name, COALESCE(g.leader_user_id, ''), COALESCE(u.is_active, FALSE),
 		       COALESCE(ma.decision, ''), COALESCE(ma.leader_user_id, '')
@@ -292,7 +310,10 @@ func VerifyCurrentApprovals(ctx context.Context, db DBQuerier, requestID, databa
 		if curLeader == "" || !leaderActive {
 			return fmt.Errorf("%w: group %q tidak memiliki leader aktif", ErrApprovalStale, gname)
 		}
-		if decision != DecisionApproved || approvedLeader != curLeader {
+		if approvedLeader == "" || approvedLeader != curLeader {
+			return fmt.Errorf("%w: approval leader saat ini untuk group %q belum terpenuhi", ErrApprovalStale, gname)
+		}
+		if requireApproved && decision != DecisionApproved {
 			return fmt.Errorf("%w: approval leader saat ini untuk group %q belum terpenuhi", ErrApprovalStale, gname)
 		}
 	}
@@ -302,7 +323,99 @@ func VerifyCurrentApprovals(ctx context.Context, db DBQuerier, requestID, databa
 	if groupCount == 0 {
 		return ErrNoDatabaseGroups
 	}
+
+	var hasOrphan bool
+	if err := db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM migration_approvals ma
+			WHERE ma.request_id = $1
+			  AND NOT EXISTS (
+				  SELECT 1
+				  FROM group_database_grants gdg
+				  WHERE gdg.group_id = ma.group_id
+				    AND gdg.database_id = $2
+				    AND gdg.access_level IN ('VIEW_ONLY', 'VIEW_EDIT')
+			  )
+		)
+	`, requestID, databaseID).Scan(&hasOrphan); err != nil {
+		return err
+	}
+	if hasOrphan {
+		return fmt.Errorf("%w: keanggotaan grant group untuk database telah berubah", ErrApprovalStale)
+	}
 	return nil
+}
+
+// VerifyCurrentApprovals memastikan setiap grup berakses VIEW_ONLY/VIEW_EDIT pada databaseID
+// memiliki leader aktif dan baris persetujuan 'approved' dari leader tersebut (untuk API dan Worker).
+func VerifyCurrentApprovals(ctx context.Context, db DBQuerier, requestID, databaseID string) error {
+	return evaluateApprovalSnapshot(ctx, db, requestID, databaseID, true)
+}
+
+// IsRequestApprovalStale melaporkan apakah snapshot approval pada status pending_review atau approved
+// tidak lagi selaras dengan grant database atau leader group saat ini.
+func IsRequestApprovalStale(ctx context.Context, db DBQuerier, requestID, databaseID, status string) (bool, error) {
+	if status != ReqStatusPendingReview && status != ReqStatusApproved {
+		return false, nil
+	}
+	err := evaluateApprovalSnapshot(ctx, db, requestID, databaseID, status == ReqStatusApproved)
+	if err == nil {
+		return false, nil
+	}
+	if errors.Is(err, ErrApprovalStale) || errors.Is(err, ErrNoDatabaseGroups) {
+		return true, nil
+	}
+	return false, err
+}
+
+// CancelRequest membatalkan change request berstatus draft, pending_review, atau approved
+// dengan menandainya sebagai rejected agar definisi migrasi tidak terus terkunci.
+func CancelRequest(ctx context.Context, db *sql.DB, requestID, actorUserID string) (*RequestDetail, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var databaseID, status string
+	err = tx.QueryRowContext(ctx, `
+		SELECT database_id, status
+		FROM migration_requests
+		WHERE id = $1
+		FOR UPDATE
+	`, requestID).Scan(&databaseID, &status)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrRequestNotFound
+		}
+		return nil, err
+	}
+	switch status {
+	case ReqStatusDraft, ReqStatusPendingReview, ReqStatusApproved:
+	default:
+		return nil, fmt.Errorf("%w: hanya request berstatus 'draft', 'pending_review', atau 'approved' yang dapat dibatalkan", ErrInvalidStateChange)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE migration_requests
+		SET status = 'rejected',
+		    approved_at = NULL,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1
+	`, requestID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	telemetry.LogAudit(ctx, "migration.request.cancel", ReqStatusRejected,
+		slog.String("request_id", requestID),
+		slog.String("database_id", databaseID),
+		slog.String("cancelled_by", actorUserID),
+	)
+	return GetRequestDetail(ctx, db, requestID)
 }
 
 // ListApprovalsForRequest mengambil semua catatan persetujuan grup untuk satu request.

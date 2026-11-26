@@ -215,7 +215,8 @@ function Data({ base, tables }: { base: string; tables: Table[] }) {
       (t) =>
         t.Schema === params.get("schema") && t.Name === params.get("table"),
     ) || tables[0];
-  const page = Number(params.get("page") || "1");
+  const rawPage = Number(params.get("page") || "1");
+  const page = Number.isInteger(rawPage) && rawPage >= 1 ? rawPage : 1;
   function query(t: Table, p: number) {
     return new URLSearchParams({
       schema: t.Schema,

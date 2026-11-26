@@ -59,6 +59,7 @@ export interface Change {
   target_execution_id?: string;
   job_id?: string;
   sql_preview: string;
+  approval_stale?: boolean;
   requested_by_username: string;
   approvals?: {
     group_id: string;
@@ -91,12 +92,13 @@ export function linearAllowed(d: Definition, s: Definitions) {
   return (
     !s.blocking_execution &&
     !s.applied_migration_ids[d.id] &&
+    d.version > tip &&
     !s.definitions.some(
       (prior) =>
         prior.version > tip &&
         prior.version < d.version &&
         !s.applied_migration_ids[prior.id] &&
-        s.rolled_back_migrations[prior.id],
+        (s.rolled_back_migrations[prior.id] || !s.failed_migrations[prior.id]),
     )
   );
 }

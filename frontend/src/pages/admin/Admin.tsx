@@ -7,7 +7,7 @@ import {
   useAction,
   useResource,
 } from "../../components/shared";
-import type { User } from "../../context/AuthContext";
+import { useAuth, type User } from "../../context/AuthContext";
 interface Group {
   id: string;
   name: string;
@@ -113,6 +113,7 @@ function Pick({
 }
 export function Users() {
   const a = useAdmin(),
+    { user: me } = useAuth(),
     { data, error } = useResource<{ users: User[] }>(
       "/admin/users",
       a.revision,
@@ -178,6 +179,8 @@ export function Users() {
             u.is_platform_admin ? "Administrator" : "Anggota",
             <div className="actions">
               <button
+                disabled={u.id === me?.id}
+                title={u.id === me?.id ? "Tidak dapat menonaktifkan akun sendiri" : undefined}
                 onClick={() =>
                   void a.save("users/" + u.id + "/toggle-active", "POST")
                 }
@@ -185,6 +188,8 @@ export function Users() {
                 {u.is_active ? "Nonaktifkan" : "Aktifkan"}
               </button>
               <button
+                disabled={u.id === me?.id && u.is_platform_admin}
+                title={u.id === me?.id && u.is_platform_admin ? "Tidak dapat mencabut hak admin akun sendiri" : undefined}
                 onClick={() =>
                   void a.save("users/" + u.id + "/toggle-admin", "POST")
                 }

@@ -67,11 +67,11 @@ func (a *attempt) finish(ctx context.Context, status string, cause error, restor
 	switch {
 	case status == "uncertain":
 		_, e = tx.ExecContext(ctx, "UPDATE database_locks SET hold_state='held_uncertain' WHERE database_id=$1", a.j.DatabaseID)
-	case status == "partial" || status == "partially_reverted" || restoreParent || (status == "failed" && a.repairTarget != ""):
+	case status == "partial" || status == "partially_reverted" || restoreParent || (attemptStatus == "failed" && a.repairTarget != ""):
 		owner := a.j.ExecutionID
 		if restoreParent {
 			owner = a.j.TargetExecutionID
-		} else if status == "failed" && a.repairTarget != "" {
+		} else if attemptStatus == "failed" && a.repairTarget != "" {
 			owner = a.repairTarget
 		}
 		_, e = tx.ExecContext(ctx, "UPDATE database_locks SET hold_state='held_partial',execution_id=$2 WHERE database_id=$1", a.j.DatabaseID, owner)
@@ -276,8 +276,8 @@ func (s *Service) Process(ctx context.Context, j queue.JobMessage) error {
 	}
 	if errors.Is(e, lock.ErrLockHeldPartial) && j.ActionType == migration.ActionUp {
 		if info, le := s.Locks.GetLock(ctx, j.DatabaseID); le == nil && info.HoldState == lock.StateHeldPartial {
-			var blockerStatus string
-			if qerr := s.DB.QueryRowContext(ctx, "SELECT status FROM migration_executions WHERE execution_id=$1", info.ExecutionID).Scan(&blockerStatus); qerr == nil && blockerStatus == migration.ExecStatusPartiallyReverted {
+			canRepair, blockerMigID, blockerVer, qerr := migration.CanExecutionBeRepaired(ctx, s.DB, j.DatabaseID, info.ExecutionID)
+			if qerr == nil && canRepair && a.d.ID != blockerMigID && a.d.Version > blockerVer {
 				lease, e = s.Locks.AcquireForRecoveryOrResume(ctx, j.DatabaseID, s.WorkerID, j.ExecutionID, info.ExecutionID, 0)
 				if e == nil {
 					a.repairTarget = info.ExecutionID
@@ -344,6 +344,8 @@ func (s *Service) Process(ctx context.Context, j queue.JobMessage) error {
 	if e = a.record(ctx, "running", nil); e != nil {
 		if a.continuation() {
 			_, _ = s.DB.ExecContext(ctx, "UPDATE database_locks SET hold_state='held_partial',execution_id=$3 WHERE database_id=$1 AND lock_token=$2", j.DatabaseID, a.token, j.TargetExecutionID)
+		} else if a.repairTarget != "" {
+			_, _ = s.DB.ExecContext(ctx, "UPDATE database_locks SET hold_state='held_partial',execution_id=$3 WHERE database_id=$1 AND lock_token=$2", j.DatabaseID, a.token, a.repairTarget)
 		} else {
 			_ = s.Locks.Release(ctx, j.DatabaseID, a.token)
 		}

@@ -115,7 +115,6 @@ func RegisterRoutes(mux *http.ServeMux, deps Dependencies) {
 	mux.Handle("POST /api/v1/requests/{request_id}/submit", protectUser(m2API.SubmitRequest))
 	mux.Handle("POST /api/v1/requests/{request_id}/approve", protectUser(m2API.ApproveRequest))
 	mux.Handle("POST /api/v1/requests/{request_id}/reject", protectUser(m2API.RejectRequest))
-	mux.Handle("POST /api/v1/requests/{request_id}/cancel", protectUser(m2API.CancelRequest))
 	mux.Handle("POST /api/v1/requests/{request_id}/enqueue", protectUser(m2API.EnqueueRequest))
 
 	// Riwayat Append-Only M2 (+ Hide rollback) dan Pemantauan Job Asinkron

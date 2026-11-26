@@ -369,55 +369,6 @@ func IsRequestApprovalStale(ctx context.Context, db DBQuerier, requestID, databa
 	return false, err
 }
 
-// CancelRequest membatalkan change request berstatus draft, pending_review, atau approved
-// dengan menandainya sebagai rejected agar definisi migrasi tidak terus terkunci.
-func CancelRequest(ctx context.Context, db *sql.DB, requestID, actorUserID string) (*RequestDetail, error) {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
-	var databaseID, status string
-	err = tx.QueryRowContext(ctx, `
-		SELECT database_id, status
-		FROM migration_requests
-		WHERE id = $1
-		FOR UPDATE
-	`, requestID).Scan(&databaseID, &status)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrRequestNotFound
-		}
-		return nil, err
-	}
-	switch status {
-	case ReqStatusDraft, ReqStatusPendingReview, ReqStatusApproved:
-	default:
-		return nil, fmt.Errorf("%w: hanya request berstatus 'draft', 'pending_review', atau 'approved' yang dapat dibatalkan", ErrInvalidStateChange)
-	}
-
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE migration_requests
-		SET status = 'rejected',
-		    approved_at = NULL,
-		    updated_at = CURRENT_TIMESTAMP
-		WHERE id = $1
-	`, requestID); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-
-	telemetry.LogAudit(ctx, "migration.request.cancel", ReqStatusRejected,
-		slog.String("request_id", requestID),
-		slog.String("database_id", databaseID),
-		slog.String("cancelled_by", actorUserID),
-	)
-	return GetRequestDetail(ctx, db, requestID)
-}
-
 // ListApprovalsForRequest mengambil semua catatan persetujuan grup untuk satu request.
 func ListApprovalsForRequest(ctx context.Context, db DBQuerier, requestID string) ([]ApprovalRecord, error) {
 	rows, err := db.QueryContext(ctx, `

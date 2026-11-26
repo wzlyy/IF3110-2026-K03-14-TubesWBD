@@ -104,6 +104,10 @@
 .m2-error {
   color: #9d3026;
 }
+.m2 td small.m2-error {
+  white-space: normal;
+  max-width: 24rem;
+}
 .m2-badge {
   display: inline-block;
   padding: 0.15rem 0.45rem;

@@ -6,8 +6,9 @@ import {
   useSearchParams,
 } from "react-router-dom";
 import { api } from "../../api/client";
+import { useAction, useResource } from "../../components/shared";
 import { useAuth } from "../../context/AuthContext";
-import { dbPath, Feedback, useAction, useResource } from "../migrations/shared";
+import { dbPath } from "../migrations/shared";
 import type { Change, Definitions } from "../migrations/shared";
 
 export function Queue() {
@@ -20,7 +21,6 @@ export function Queue() {
     <section className="m2">
       <h1>Antrean tinjauan</h1>
       {db && <Link to={dbPath(db) + "/migrations"}>Definisi migrasi</Link>}
-      <Feedback error={error} />
       {!data && !error && <p>Memuat daftar permintaan…</p>}
       {data && !data.requests?.length && <p>Belum ada permintaan perubahan.</p>}
       {data?.requests?.map((r) => (
@@ -53,10 +53,7 @@ export function Review() {
   const canDecide =
     r?.status === "pending_review" &&
     r.approvals?.some(
-      (a) =>
-        a.decision === "pending" &&
-        a.leader_user_id === user?.id &&
-        user?.leader_group_ids?.includes(a.group_id),
+      (a) => a.decision === "pending" && a.leader_user_id === user?.id,
     );
   function submit(verb: string) {
     void action.run(async () => {
@@ -78,7 +75,6 @@ export function Review() {
     <section className="m2">
       <Link to="/requests">Antrean tinjauan</Link>
       <h1>{r?.migration_name ?? "Permintaan perubahan"}</h1>
-      <Feedback error={error || defs.error || action.error} />
       {r && (
         <>
           <article className="m2-panel">

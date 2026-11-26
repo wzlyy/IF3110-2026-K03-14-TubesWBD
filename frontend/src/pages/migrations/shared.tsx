@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../../api/client";
 
@@ -28,6 +27,9 @@ export interface Execution {
   migration_version: number;
   migration_revision: number;
   action_type: string;
+  reverted_execution_id?: string;
+  parent_execution_id?: string;
+  attempt_number?: number;
   started_at: string;
   executed_by_username: string;
   status: string;
@@ -35,6 +37,7 @@ export interface Execution {
   total_rows_affected: number;
   executed_sql_snapshot: string;
   error_message?: string;
+  error_sqlstate?: string;
 }
 export interface Definitions {
   access_level: string;
@@ -68,54 +71,6 @@ export interface Change {
   }[];
 }
 export const dbPath = (db: string) => "/databases/" + encodeURIComponent(db);
-export function useResource<T>(path: string, polling?: (value: T) => boolean) {
-  const [state, setState] = useState<{
-    path: string;
-    data?: T;
-    error?: string;
-  }>({ path: "" });
-  const [revision, refresh] = useState(0);
-  useEffect(() => {
-    if (!path) return;
-    let alive = true;
-    let timer: ReturnType<typeof setTimeout>;
-    const load = async () => {
-      try {
-        const data = await api<T>(path);
-        if (!alive) return;
-        setState({ path, data });
-        if (polling?.(data)) timer = setTimeout(load, 2000);
-      } catch (e) {
-        if (alive) setState({ path, error: String(e) });
-      }
-    };
-    void load();
-    return () => {
-      alive = false;
-      clearTimeout(timer);
-    };
-  }, [path, revision, polling]);
-  return {
-    ...(path === state.path ? state : {}),
-    refresh: () => refresh((n) => n + 1),
-  };
-}
-export function useAction() {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  async function run(task: () => Promise<void>) {
-    setBusy(true);
-    setError("");
-    try {
-      await task();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-  return { run, busy, error };
-}
 export function useCreateRequest() {
   const navigate = useNavigate();
   return async (
@@ -144,11 +99,4 @@ export function linearAllowed(d: Definition, s: Definitions) {
         s.rolled_back_migrations[prior.id],
     )
   );
-}
-export function Feedback({ error }: { error?: string }) {
-  return error ? (
-    <p className="m2-error" role="alert">
-      {error}
-    </p>
-  ) : null;
 }

@@ -1,11 +1,6 @@
 import { Link, useParams } from "react-router-dom";
-import {
-  dbPath,
-  Feedback,
-  useAction,
-  useCreateRequest,
-  useResource,
-} from "../migrations/shared";
+import { useAction, useResource } from "../../components/shared";
+import { dbPath, useCreateRequest } from "../migrations/shared";
 import type { Definitions, Execution } from "../migrations/shared";
 interface Batch {
   batch_number: number;
@@ -53,7 +48,11 @@ function cursorProgress(batches: Batch[] = []) {
 }
 export default function JobPage() {
   const { id = "" } = useParams();
-  const { data: j, error, refresh } = useResource<Job>("/jobs/" + id, active);
+  const {
+    data: j,
+    error,
+    refresh,
+  } = useResource<Job>("/jobs/" + id, { polling: active });
   const action = useAction();
   const create = useCreateRequest();
   const defs = useResource<Definitions>(
@@ -69,7 +68,6 @@ export default function JobPage() {
   return (
     <section className="m2">
       <h1>Pemantauan job</h1>
-      <Feedback error={error || defs.error || action.error} />
       {error && <button onClick={refresh}>Coba lagi</button>}
       {j && (
         <>
@@ -101,7 +99,12 @@ export default function JobPage() {
             <p role="status">
               Status <strong className="m2-badge">{j.request_status}</strong>
             </p>
-            {e?.error_message && <p className="m2-error">{e.error_message}</p>}
+            {(e?.error_message || e?.error_sqlstate) && (
+              <p className="m2-error">
+                {e.error_sqlstate ? `[${e.error_sqlstate}] ` : ""}
+                {e.error_message}
+              </p>
+            )}
             {j.request_status === "uncertain" && (
               <p>
                 Hasil eksekusi memerlukan rekonsiliasi sebelum migrasi lain

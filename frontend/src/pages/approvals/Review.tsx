@@ -41,7 +41,7 @@ export function Queue() {
 export function Review() {
   const { id = "" } = useParams();
   const path = "/requests/" + id;
-  const { data: r, error, refresh } = useResource<Change>(path);
+  const { data: r, refresh } = useResource<Change>(path);
   const defs = useResource<Definitions>(
     r ? dbPath(r.database_id) + "/migrations" : "",
   );

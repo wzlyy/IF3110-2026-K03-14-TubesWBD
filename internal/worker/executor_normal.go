@@ -7,7 +7,7 @@ import (
 )
 
 func (a *attempt) normal(ctx context.Context) error {
-	statements, err := migration.ValidateSQL("postgres", a.snapshot)
+	statements, err := migration.SplitPostgresStatements(a.snapshot)
 	if err != nil {
 		return err
 	}

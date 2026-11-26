@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 const MaxSQLBytes = 16 * 1024
@@ -12,46 +13,91 @@ var ErrInvalidSQL = errors.New("Masukkan SQL DDL/DML yang valid (maksimum 16 KiB
 
 type Statement struct{ SQL, Kind string }
 
-// ValidateSQL splits statements without splitting quoted strings, identifiers,
-// comments or PostgreSQL dollar bodies. Transaction ownership stays with Runner.
-// This is a bounded statement lexer; the target still validates SQL grammar.
-func ValidateSQL(dbms, query string) ([]Statement, error) {
+func canonicalSQLKind(word string) (string, bool) {
+	switch word {
+	case "SELECT":
+		return "SELECT", true
+	case "INSERT":
+		return "INSERT", true
+	case "UPDATE":
+		return "UPDATE", true
+	case "DELETE":
+		return "DELETE", true
+	case "WITH":
+		return "WITH", true
+	case "CREATE":
+		return "CREATE", true
+	case "ALTER":
+		return "ALTER", true
+	case "DROP":
+		return "DROP", true
+	case "TRUNCATE":
+		return "TRUNCATE", true
+	case "COMMENT":
+		return "COMMENT", true
+	case "GRANT":
+		return "GRANT", true
+	case "REVOKE":
+		return "REVOKE", true
+	default:
+		return "", false
+	}
+}
+
+func trimSQLBounds(query string, start, end int) (int, int) {
+	for start < end {
+		r, size := utf8.DecodeRuneInString(query[start:end])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		start += size
+	}
+	for end > start {
+		r, size := utf8.DecodeLastRuneInString(query[start:end])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		end -= size
+	}
+	return start, end
+}
+
+func validateCleanStatement(dbms string, clean *strings.Builder) (string, bool, error) {
+	words := strings.Fields(strings.ToUpper(clean.String()))
+	clean.Reset()
+	if len(words) == 0 {
+		return "", false, nil
+	}
+	kind, ok := canonicalSQLKind(words[0])
+	if !ok {
+		return "", false, ErrInvalidSQL
+	}
+	if dbms == "mysql" {
+		for _, word := range words {
+			if word == "PROCEDURE" || word == "FUNCTION" || word == "TRIGGER" || word == "EVENT" || word == "TEMPORARY" {
+				return "", false, ErrInvalidSQL
+			}
+		}
+	}
+	return kind, true, nil
+}
+
+func lexSQL(dbms, query string) ([]int, []int, []string, error) {
 	lowerQuery := strings.ToLower(query)
 	if (dbms != "postgres" && dbms != "mysql") || len(query) > MaxSQLBytes || strings.ContainsRune(query, 0) ||
 		strings.Contains(lowerQuery, "_dbplatform_migration_receipts") || strings.Contains(lowerQuery, "_platform_meta") {
-		return nil, ErrInvalidSQL
+		return nil, nil, nil, ErrInvalidSQL
 	}
-	var statements []Statement
+	var starts, ends []int
+	var kinds []string
 	var clean strings.Builder
 	start := 0
-	appendStatement := func(end int) error {
-		words := strings.Fields(strings.ToUpper(clean.String()))
-		if len(words) == 0 {
-			clean.Reset()
-			return nil
-		}
-		switch words[0] {
-		case "SELECT", "INSERT", "UPDATE", "DELETE", "WITH", "CREATE", "ALTER", "DROP", "TRUNCATE", "COMMENT", "GRANT", "REVOKE":
-		default:
-			return ErrInvalidSQL
-		}
-		if dbms == "mysql" {
-			for _, word := range words {
-				if word == "PROCEDURE" || word == "FUNCTION" || word == "TRIGGER" || word == "EVENT" || word == "TEMPORARY" {
-					return ErrInvalidSQL
-				}
-			}
-		}
-		statements = append(statements, Statement{SQL: strings.TrimSpace(query[start:end]), Kind: words[0]})
-		clean.Reset()
-		return nil
-	}
 	for i := 0; i < len(query); {
 		c := query[i]
 		if c == '-' && i+1 < len(query) && query[i+1] == '-' {
 			// MySQL recognizes -- only when followed by whitespace.
 			if dbms == "mysql" && i+2 < len(query) && !unicode.IsSpace(rune(query[i+2])) {
-				return nil, ErrInvalidSQL
+				return nil, nil, nil, ErrInvalidSQL
 			}
 			end := strings.IndexByte(query[i:], '\n')
 			if end < 0 {
@@ -74,7 +120,7 @@ func ValidateSQL(dbms, query string) ([]Statement, error) {
 		}
 		if c == '/' && i+1 < len(query) && query[i+1] == '*' {
 			if i+2 < len(query) && query[i+2] == '!' {
-				return nil, ErrInvalidSQL
+				return nil, nil, nil, ErrInvalidSQL
 			}
 			i += 2
 			depth := 1
@@ -90,7 +136,7 @@ func ValidateSQL(dbms, query string) ([]Statement, error) {
 				}
 			}
 			if depth != 0 {
-				return nil, ErrInvalidSQL
+				return nil, nil, nil, ErrInvalidSQL
 			}
 			clean.WriteByte(' ')
 			continue
@@ -117,7 +163,7 @@ func ValidateSQL(dbms, query string) ([]Statement, error) {
 				i++
 			}
 			if !closed {
-				return nil, ErrInvalidSQL
+				return nil, nil, nil, ErrInvalidSQL
 			}
 			clean.WriteString(" quoted ")
 			continue
@@ -131,7 +177,7 @@ func ValidateSQL(dbms, query string) ([]Statement, error) {
 				tag := query[i : j+1]
 				end := strings.Index(query[j+1:], tag)
 				if end < 0 {
-					return nil, ErrInvalidSQL
+					return nil, nil, nil, ErrInvalidSQL
 				}
 				i = j + 1 + end + len(tag)
 				clean.WriteString(" quoted ")
@@ -139,8 +185,15 @@ func ValidateSQL(dbms, query string) ([]Statement, error) {
 			}
 		}
 		if c == ';' {
-			if err := appendStatement(i); err != nil {
-				return nil, err
+			kind, ok, err := validateCleanStatement(dbms, &clean)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			if ok {
+				s, e := trimSQLBounds(query, start, i)
+				starts = append(starts, s)
+				ends = append(ends, e)
+				kinds = append(kinds, kind)
 			}
 			i++
 			start = i
@@ -149,11 +202,47 @@ func ValidateSQL(dbms, query string) ([]Statement, error) {
 		clean.WriteByte(c)
 		i++
 	}
-	if err := appendStatement(len(query)); err != nil {
+	kind, ok, err := validateCleanStatement(dbms, &clean)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if ok {
+		s, e := trimSQLBounds(query, start, len(query))
+		starts = append(starts, s)
+		ends = append(ends, e)
+		kinds = append(kinds, kind)
+	}
+	if len(starts) == 0 {
+		return nil, nil, nil, ErrInvalidSQL
+	}
+	return starts, ends, kinds, nil
+}
+
+// ValidateSQL splits statements without splitting quoted strings, identifiers,
+// comments or PostgreSQL dollar bodies. Transaction ownership stays with Runner.
+// This is a bounded statement lexer; the target still validates SQL grammar.
+func ValidateSQL(dbms, query string) ([]Statement, error) {
+	starts, ends, kinds, err := lexSQL(dbms, query)
+	if err != nil {
 		return nil, err
 	}
-	if len(statements) == 0 {
-		return nil, ErrInvalidSQL
+	statements := make([]Statement, len(starts))
+	for i := range starts {
+		statements[i] = Statement{SQL: query[starts[i]:ends[i]], Kind: kinds[i]}
+	}
+	return statements, nil
+}
+
+// SplitPostgresStatements splits an approved PostgreSQL migration snapshot into
+// validated statements for the async worker without sharing ValidateSQL's HTTP caller context.
+func SplitPostgresStatements(query string) ([]Statement, error) {
+	starts, ends, kinds, err := lexSQL("postgres", query)
+	if err != nil {
+		return nil, err
+	}
+	statements := make([]Statement, len(starts))
+	for i := range starts {
+		statements[i] = Statement{SQL: query[starts[i]:ends[i]], Kind: kinds[i]}
 	}
 	return statements, nil
 }

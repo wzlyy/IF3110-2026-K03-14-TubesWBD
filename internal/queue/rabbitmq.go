@@ -235,10 +235,23 @@ func (c *RabbitMQClient) publish(ctx context.Context, routingKey string, msg Job
 		return fmt.Errorf("%w: publish failed: %v", ErrQueueUnavailable, err)
 	}
 
+	meta := telemetry.JobMetaFromContext(ctx)
+	if msg.MigrationID != "" {
+		meta.MigrationID = msg.MigrationID
+	}
+	if msg.JobID != "" {
+		meta.JobID = msg.JobID
+	}
+	if msg.ExecutionID != "" {
+		meta.ExecutionID = msg.ExecutionID
+	}
+	if msg.AttemptNumber > 0 {
+		meta.Attempt = msg.AttemptNumber
+	}
+	ctx = telemetry.WithJobMeta(ctx, meta)
+
 	telemetry.LogAudit(ctx, "queue.publish", "ok",
 		slog.String("routing_key", routingKey),
-		slog.String("job_id", msg.JobID),
-		slog.String("execution_id", msg.ExecutionID),
 		slog.String("action_type", msg.ActionType),
 	)
 	return nil

@@ -84,6 +84,9 @@ func (a *attempt) batch(ctx context.Context) error {
 			tx.Rollback()
 		}
 		if e != nil {
+			if !done && !errors.Is(e, errUncertain) {
+				telemetry.GlobalMetrics().RecordBatchProcessed("failed", 0)
+			}
 			return e
 		}
 		if done {
@@ -162,25 +165,35 @@ func (a *attempt) revert(ctx context.Context, b batchSpec) error {
 		var c checkpoint
 		e = tx.QueryRowContext(ctx, "SELECT batch_number,cursor_start,cursor_end,target_max_cursor,rows_affected FROM _platform_meta.batch_checkpoints WHERE execution_id=$1 AND NOT is_reverted ORDER BY batch_number DESC LIMIT 1 FOR UPDATE", a.root).Scan(&c.number, &c.start, &c.end, &c.max, &c.rows)
 		done := errors.Is(e, sql.ErrNoRows)
+		batchCtx := ctx
 		if done {
 			e = a.proof(ctx, tx)
 		} else if e == nil {
-			e = a.revertCheckpoint(ctx, tx, b, c)
+			meta := telemetry.JobMetaFromContext(ctx)
+			meta.BatchNumber = c.number
+			batchCtx = telemetry.WithJobMeta(ctx, meta)
+			e = a.revertCheckpoint(batchCtx, tx, b, c)
 			if e == nil {
-				_, e = tx.ExecContext(ctx, "UPDATE _platform_meta.batch_checkpoints SET is_reverted=true,reverted_at=now(),revert_execution=$3 WHERE execution_id=$1 AND batch_number=$2", a.root, c.number, a.j.ExecutionID)
+				_, e = tx.ExecContext(batchCtx, "UPDATE _platform_meta.batch_checkpoints SET is_reverted=true,reverted_at=now(),revert_execution=$3 WHERE execution_id=$1 AND batch_number=$2", a.root, c.number, a.j.ExecutionID)
 			}
 		}
 		if e != nil {
 			tx.Rollback()
+			if !done && !errors.Is(e, errUncertain) {
+				telemetry.GlobalMetrics().RecordBatchProcessed("failed", 0)
+			}
 			return e
 		}
 		if e = commit(tx); e != nil {
+			if !done && !errors.Is(e, errUncertain) {
+				telemetry.GlobalMetrics().RecordBatchProcessed("failed", 0)
+			}
 			return e
 		}
 		if done {
 			return nil
 		}
-		if e = a.syncOne(ctx, c, "revert"); e != nil {
+		if e = a.syncOne(batchCtx, c, "revert"); e != nil {
 			return e
 		}
 	}

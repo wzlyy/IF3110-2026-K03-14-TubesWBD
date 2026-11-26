@@ -233,7 +233,7 @@ func LogEvent(ctx context.Context, level slog.Level, event, status string, extra
 // LogAudit mencatat event audit level info.
 func LogAudit(ctx context.Context, event, status string, extra ...slog.Attr) {
 	lvl := slog.LevelInfo
-	if status == "error" || status == "failed" || status == "denied" {
+	if status == "error" || status == "failed" || status == "denied" || status == "deferred" {
 		lvl = slog.LevelWarn
 	}
 	LogEvent(ctx, lvl, event, status, extra...)

@@ -36,11 +36,11 @@ func (a *attempt) finish(ctx context.Context, status string, cause error, restor
 		return e
 	}
 	defer tx.Rollback()
-	var token string
-	if e = tx.QueryRowContext(ctx, "SELECT lock_token FROM database_locks WHERE database_id=$1 FOR UPDATE", a.j.DatabaseID).Scan(&token); e != nil {
+	var token, holdState string
+	if e = tx.QueryRowContext(ctx, "SELECT lock_token, hold_state FROM database_locks WHERE database_id=$1 FOR UPDATE", a.j.DatabaseID).Scan(&token, &holdState); e != nil {
 		return e
 	}
-	if token != a.token {
+	if token != a.token || holdState == string(lock.StateHeldPartial) {
 		return lock.ErrLockNotOwned
 	}
 	var msg, state any
@@ -76,7 +76,12 @@ func (a *attempt) finish(ctx context.Context, status string, cause error, restor
 		return e
 	}
 	if e = tx.Commit(); e == nil {
-		telemetry.LogAudit(ctx, "worker.finish", attemptStatus, slog.String("execution_id", a.j.ExecutionID),
+		dur := time.Duration(-1)
+		if attemptStatus != "uncertain" && !a.started.IsZero() {
+			dur = time.Since(a.started)
+		}
+		telemetry.GlobalMetrics().RecordJobFinished(a.j.ActionType, a.j.ExecutionMode, attemptStatus, dur)
+		telemetry.LogAudit(ctx, "worker.finish", attemptStatus,
 			slog.Any("error", msg), slog.Any("sqlstate", state))
 	}
 	return e
@@ -129,11 +134,15 @@ func (a *attempt) inspect(ctx context.Context) (string, error) {
 		rows.Close()
 		if !proof {
 			var anyBatch, remaining, atMax bool
-			e = tx.QueryRowContext(ctx, "SELECT count(*)>0,coalesce(bool_or(NOT is_reverted),false),coalesce(bool_or(cursor_end=target_max_cursor),false) FROM _platform_meta.batch_checkpoints WHERE execution_id=$1", a.root).Scan(&anyBatch, &remaining, &atMax)
+			var ownCount int
+			e = tx.QueryRowContext(ctx, "SELECT count(*)>0,count(*) FILTER (WHERE "+owner+"=$2),coalesce(bool_or(NOT is_reverted),false),coalesce(bool_or(cursor_end=target_max_cursor),false) FROM _platform_meta.batch_checkpoints WHERE execution_id=$1", a.root, a.j.ExecutionID).Scan(&anyBatch, &ownCount, &remaining, &atMax)
 			if e != nil {
 				return "", e
 			}
 			if anyBatch {
+				if a.continuation() && ownCount == 0 {
+					return "failed", nil
+				}
 				if dir == "revert" {
 					if remaining {
 						return "partially_reverted", nil
@@ -162,12 +171,17 @@ func (s *Service) verify(ctx context.Context, dbID, execution, token string) (er
 		}
 	}()
 	var j queue.JobMessage
-	e := s.DB.QueryRowContext(ctx, `SELECT e.job_id,e.request_id,e.database_id,e.migration_id,e.action_type,e.execution_mode,coalesce(r.target_execution_id,''),e.attempt_number FROM migration_executions e JOIN migration_requests r ON r.id=e.request_id WHERE e.execution_id=$1`, execution).Scan(&j.JobID, &j.RequestID, &j.DatabaseID, &j.MigrationID, &j.ActionType, &j.ExecutionMode, &j.TargetExecutionID, &j.AttemptNumber)
+	var execStatus string
+	var startedAt time.Time
+	e := s.DB.QueryRowContext(ctx, `SELECT e.job_id,e.request_id,e.database_id,e.migration_id,e.action_type,e.execution_mode,coalesce(r.target_execution_id,''),e.attempt_number,e.status,e.started_at FROM migration_executions e JOIN migration_requests r ON r.id=e.request_id WHERE e.execution_id=$1`, execution).Scan(&j.JobID, &j.RequestID, &j.DatabaseID, &j.MigrationID, &j.ActionType, &j.ExecutionMode, &j.TargetExecutionID, &j.AttemptNumber, &execStatus, &startedAt)
 	if e != nil {
 		return e
 	}
+	if execStatus != "uncertain" && execStatus != "running" {
+		return nil
+	}
 	j.ExecutionID = execution
-	a := attempt{s: s, j: j, token: token}
+	a := attempt{s: s, j: j, token: token, started: startedAt}
 	if e = a.load(ctx); e != nil {
 		return e
 	}
@@ -180,7 +194,16 @@ func (s *Service) verify(ctx context.Context, dbID, execution, token string) (er
 	if status != "success" {
 		reason = errors.New("recovered worker lease using target commit evidence")
 	}
-	return a.finish(ctx, status, reason, a.continuation() && status == "failed")
+	if fe := a.finish(ctx, status, reason, a.continuation() && status == "failed"); fe != nil {
+		if errors.Is(fe, sql.ErrNoRows) || errors.Is(fe, lock.ErrLockNotOwned) {
+			var curStatus string
+			if qerr := s.DB.QueryRowContext(ctx, `SELECT status FROM migration_executions WHERE execution_id=$1`, execution).Scan(&curStatus); qerr == nil && curStatus != "uncertain" && curStatus != "running" {
+				return nil
+			}
+		}
+		return fe
+	}
+	return nil
 }
 
 func (s *Service) Process(ctx context.Context, j queue.JobMessage) error {
@@ -200,6 +223,10 @@ func (s *Service) Process(ctx context.Context, j queue.JobMessage) error {
 		return e
 	}
 	ctx = a.withTelemetry(ctx)
+	lockWaitStart := time.Now()
+	if j.LockWaitStartedAt != nil && !j.LockWaitStartedAt.IsZero() {
+		lockWaitStart = *j.LockWaitStartedAt
+	}
 	var lease *lock.Lease
 	if a.continuation() {
 		lease, e = s.Locks.AcquireForRecoveryOrResume(ctx, j.DatabaseID, s.WorkerID, j.ExecutionID, j.TargetExecutionID, 0)
@@ -236,8 +263,14 @@ func (s *Service) Process(ctx context.Context, j queue.JobMessage) error {
 		if le != nil {
 			return le
 		}
-		if info.HoldState == lock.StateHeldUncertain && info.ExecutionID == j.ExecutionID {
-			return s.verify(ctx, j.DatabaseID, j.ExecutionID, info.LockToken)
+		if info.HoldState == lock.StateHeldUncertain {
+			if ve := s.verify(ctx, j.DatabaseID, info.ExecutionID, info.LockToken); ve != nil {
+				return ve
+			}
+			if info.ExecutionID == j.ExecutionID {
+				return nil
+			}
+			return lock.ErrLockBusy
 		}
 		if info.HoldState != lock.StateRunning {
 			if info.ExecutionID == j.ExecutionID {
@@ -278,7 +311,9 @@ func (s *Service) Process(ctx context.Context, j queue.JobMessage) error {
 	if rs != "pending_queue" && rs != "running" {
 		return s.Locks.Release(ctx, j.DatabaseID, a.token)
 	}
+	telemetry.GlobalMetrics().ObserveLockWait(time.Since(lockWaitStart))
 	check := a.validate(ctx)
+	a.started = time.Now()
 	if e = a.record(ctx, "running", nil); e != nil {
 		if a.continuation() {
 			_, _ = s.DB.ExecContext(ctx, "UPDATE database_locks SET hold_state='held_partial',execution_id=$3 WHERE database_id=$1 AND lock_token=$2", j.DatabaseID, a.token, j.TargetExecutionID)
@@ -290,7 +325,6 @@ func (s *Service) Process(ctx context.Context, j queue.JobMessage) error {
 	if check != nil {
 		return a.finish(ctx, "failed", check, a.continuation() && !errors.Is(check, migration.ErrBatchActionInvalid))
 	}
-	started := time.Now()
 	telemetry.GlobalMetrics().RecordJobStarted(j.ActionType, j.ExecutionMode, time.Since(j.EnqueuedAt))
 	if e = a.open(ctx); e == nil {
 		e = a.metadata(ctx)
@@ -332,13 +366,11 @@ func (s *Service) Process(ctx context.Context, j queue.JobMessage) error {
 			if le := a.finish(ctx, "pending_queue", e, false); le != nil {
 				return le
 			}
-			telemetry.GlobalMetrics().RecordJobFinished(j.ActionType, j.ExecutionMode, "failed", time.Since(started))
 			return errors.Join(errNextAttempt, e)
 		}
 	}
 	if fe := a.finish(ctx, status, e, a.continuation() && status == "failed"); fe != nil {
 		return fe
 	}
-	telemetry.GlobalMetrics().RecordJobFinished(j.ActionType, j.ExecutionMode, status, time.Since(started))
 	return nil
 }

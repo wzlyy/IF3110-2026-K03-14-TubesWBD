@@ -9,8 +9,14 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
       - run: go vet ./...
-      - run: go build ./cmd/server
+      - run: go build ./cmd/server ./cmd/worker ./cmd/seed
+      - run: npm --prefix frontend ci && npm --prefix frontend run build
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
       - run: docker compose -p wbd-test -f compose.test.yaml up -d --wait
       - name: Unit and integration scenarios

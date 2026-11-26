@@ -1,13 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import {
-  dbPath,
-  Feedback,
-  linearAllowed,
-  useAction,
-  useCreateRequest,
-  useResource,
-} from "./shared";
+import { useAction, useResource } from "../../components/shared";
+import { dbPath, linearAllowed, useCreateRequest } from "./shared";
 import type { Definitions, Execution } from "./shared";
 
 function Snapshot({ record, close }: { record: Execution; close: () => void }) {
@@ -20,7 +14,22 @@ function Snapshot({ record, close }: { record: Execution; close: () => void }) {
   return (
     <dialog ref={ref} onCancel={close} aria-labelledby="snapshot-title">
       <h2 id="snapshot-title">Snapshot SQL yang dieksekusi</h2>
-      <p>{record.execution_id}</p>
+      <p>
+        <code>{record.execution_id}</code>
+        {record.attempt_number != null &&
+          ` · Percobaan #${record.attempt_number}`}
+      </p>
+      {record.reverted_execution_id && (
+        <p>
+          Membatalkan eksekusi: <code>{record.reverted_execution_id}</code>
+        </p>
+      )}
+      {(record.error_message || record.error_sqlstate) && (
+        <p className="m2-error" role="alert">
+          {record.error_sqlstate ? `SQLSTATE ${record.error_sqlstate}: ` : ""}
+          {record.error_message}
+        </p>
+      )}
       <pre>{record.executed_sql_snapshot}</pre>
       <button autoFocus onClick={close}>
         Tutup
@@ -78,7 +87,6 @@ export default function History() {
             </button>
           ))}
       </div>
-      <Feedback error={history.error || defs.error || action.error} />
       {!history.data && !history.error && <p>Memuat riwayat eksekusi…</p>}
       {history.data && (
         <div
@@ -111,11 +119,37 @@ export default function History() {
                     <small>{e.migration_id}</small>v{e.migration_version} · r
                     {e.migration_revision}
                   </td>
-                  <td>{e.execution_id}</td>
-                  <td>{e.action_type}</td>
+                  <td>
+                    {e.execution_id}
+                    {e.attempt_number != null && (
+                      <small>Percobaan #{e.attempt_number}</small>
+                    )}
+                  </td>
+                  <td>
+                    {e.action_type}
+                    {e.reverted_execution_id && (
+                      <small>
+                        membatalkan <code>{e.reverted_execution_id}</code>
+                      </small>
+                    )}
+                    {e.parent_execution_id &&
+                      e.parent_execution_id !== e.reverted_execution_id && (
+                        <small>
+                          lanjutan <code>{e.parent_execution_id}</code>
+                        </small>
+                      )}
+                  </td>
                   <td>{e.executed_by_username}</td>
                   <td>{new Date(e.started_at).toLocaleString()}</td>
-                  <td>{e.status}</td>
+                  <td>
+                    {e.status}
+                    {(e.error_message || e.error_sqlstate) && (
+                      <small className="m2-error">
+                        {e.error_sqlstate ? `[${e.error_sqlstate}] ` : ""}
+                        {e.error_message}
+                      </small>
+                    )}
+                  </td>
                   <td>
                     {e.total_batches_committed} / {e.total_rows_affected}
                   </td>

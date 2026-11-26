@@ -31,9 +31,10 @@ type JobMessage struct {
 	BatchSizeOverride   *int      `json:"batch_size_override,omitempty"`
 	RequestedBy         string    `json:"requested_by"`
 	RequestedByUsername string    `json:"requested_by_username,omitempty"`
-	AttemptNumber     int       `json:"attempt_number"`
-	RetryCount        int       `json:"retry_count"`
-	EnqueuedAt        time.Time `json:"enqueued_at"`
+	AttemptNumber     int        `json:"attempt_number"`
+	RetryCount        int        `json:"retry_count"`
+	EnqueuedAt        time.Time  `json:"enqueued_at"`
+	LockWaitStartedAt *time.Time `json:"lock_wait_started_at,omitempty"`
 }
 
 // Publisher adalah antarmuka pengiriman pesan persisten (mudah di-mock pada unit test).

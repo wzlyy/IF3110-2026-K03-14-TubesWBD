@@ -65,7 +65,11 @@ func (s *Service) consume(ctx context.Context, c *queue.RabbitMQClient, n int) e
 	return nil
 }
 
-func (s *Service) delivery(base context.Context, c *queue.RabbitMQClient, d amqp.Delivery) {
+type retryPublisher interface {
+	PublishRetry(ctx context.Context, msg queue.JobMessage, delay time.Duration) error
+}
+
+func (s *Service) delivery(base context.Context, c retryPublisher, d amqp.Delivery) {
 	var j queue.JobMessage
 	if e := json.Unmarshal(d.Body, &j); e != nil || j.JobID == "" || j.ExecutionID == "" || j.RequestID == "" {
 		d.Reject(false)
@@ -99,13 +103,22 @@ func (s *Service) delivery(base context.Context, c *queue.RabbitMQClient, d amqp
 	ctx = telemetry.WithActor(telemetry.WithDatabase(ctx, dbLabel), actor)
 	ctx, span := telemetry.Tracer().Start(ctx, "worker.consume", trace.WithSpanKind(trace.SpanKindConsumer))
 	defer span.End()
-	err := s.Process(ctx, j)
+	attemptAt := time.Now().UTC()
+	proc := s.Process
+	if s.processFn != nil {
+		proc = s.processFn
+	}
+	err := proc(ctx, j)
 	if err == nil {
 		d.Ack(false)
 		return
 	}
 	span.RecordError(err)
-	slog.WarnContext(ctx, "migration delivery deferred", "job_id", j.JobID, "error", telemetry.RedactString(err.Error()))
+	telemetry.LogAudit(ctx, "worker.delivery.deferred", "deferred",
+		slog.String("action_type", j.ActionType),
+		slog.Int("retry_count", j.RetryCount),
+		slog.String("error", telemetry.RedactString(err.Error())),
+	)
 	if base.Err() != nil {
 		d.Nack(false, true)
 		return
@@ -116,12 +129,24 @@ func (s *Service) delivery(base context.Context, c *queue.RabbitMQClient, d amqp
 	}
 	if errors.Is(err, errVerificationPending) {
 		// Checking commit evidence must survive an outage longer than the SQL retry budget.
+		if j.LockWaitStartedAt == nil {
+			j.LockWaitStartedAt = &attemptAt
+		}
 		err = c.PublishRetry(ctx, j, lock.DefaultLeaseTTL)
 	} else if errors.Is(err, lock.ErrLockBusy) || errors.Is(err, lock.ErrLockNotOwned) || errors.Is(err, lock.ErrLockNotFound) {
+		if j.LockWaitStartedAt == nil {
+			j.LockWaitStartedAt = &attemptAt
+		}
 		err = c.PublishRetry(ctx, j, 2*time.Second)
 	} else if j.RetryCount < queue.MaxTransientRetries {
 		if errors.Is(err, errNextAttempt) {
 			j = nextAttempt(j)
+			ctx = telemetry.WithJobMeta(ctx, telemetry.JobLogMeta{
+				MigrationID: j.MigrationID,
+				ExecutionID: j.ExecutionID,
+				JobID:       j.JobID,
+				Attempt:     j.AttemptNumber,
+			})
 		}
 		delay := queue.RetryBackoff(j.RetryCount)
 		j.RetryCount++

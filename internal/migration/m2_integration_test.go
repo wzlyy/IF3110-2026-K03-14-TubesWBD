@@ -460,9 +460,11 @@ func TestM2AuthAdminExplorerBatchValidationAndRejectionIntegration(t *testing.T)
 		DROP TABLE IF EXISTS public.m2_batch_orders;
 		CREATE TABLE public.m2_batch_orders (
 			id BIGSERIAL PRIMARY KEY,
+			partial_key TEXT NOT NULL DEFAULT 'k1',
 			status TEXT NOT NULL DEFAULT 'pending'
 		);
-		INSERT INTO public.m2_batch_orders (status) VALUES ('pending'), ('pending');
+		CREATE UNIQUE INDEX m2_batch_orders_partial_uidx ON public.m2_batch_orders (partial_key) WHERE status = 'pending';
+		INSERT INTO public.m2_batch_orders (partial_key, status) VALUES ('k1', 'pending'), ('k2', 'pending');
 	`); err != nil {
 		t.Fatalf("seed target table: %v", err)
 	}
@@ -497,6 +499,17 @@ func TestM2AuthAdminExplorerBatchValidationAndRejectionIntegration(t *testing.T)
 		"batch_size":          100,
 	}); rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("batch with non-unique cursor = %d, want 422 (%s)", rec.Code, rec.Body.String())
+	}
+	if rec := env.doJSON(t, http.MethodPost, "/api/v1/databases/"+env.db1ID+"/migrations", env.editorSess, map[string]any{
+		"name":                "bad_batch_partial_uidx",
+		"sql_up":              "UPDATE public.m2_batch_orders SET status = 'done' WHERE partial_key BETWEEN $1 AND $2;",
+		"sql_down":            "UPDATE public.m2_batch_orders SET status = 'pending' WHERE partial_key BETWEEN $1 AND $2;",
+		"execution_mode":      "batch",
+		"batch_table":         "public.m2_batch_orders",
+		"batch_cursor_column": "partial_key",
+		"batch_size":          100,
+	}); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("batch with partial unique index cursor = %d, want 422 (%s)", rec.Code, rec.Body.String())
 	}
 	if rec := env.doJSON(t, http.MethodPost, "/api/v1/databases/"+env.db1ID+"/migrations", env.editorSess, map[string]any{
 		"name":                "bad_batch_where",
@@ -582,5 +595,35 @@ func TestM2AuthAdminExplorerBatchValidationAndRejectionIntegration(t *testing.T)
 		"target_execution_id": partialExecID,
 	}); rec.Code != http.StatusCreated {
 		t.Fatalf("revert_batch targeting partial execution = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 7. GET /api/v1/requests memuat persetujuan secara batch (mengisi 2 approval untuk submitted dan [] untuk draft).
+	recReqs := env.doJSON(t, http.MethodGet, "/api/v1/requests", env.viewerSess, nil)
+	if recReqs.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/requests = %d: %s", recReqs.Code, recReqs.Body.String())
+	}
+	var listResp struct {
+		Requests []migration.RequestDetail `json:"requests"`
+	}
+	if err := json.Unmarshal(recReqs.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("decode GET /requests: %v", err)
+	}
+	if len(listResp.Requests) < 3 {
+		t.Fatalf("expected at least 3 requests, got %d", len(listResp.Requests))
+	}
+	var sawSubmitted, sawDraft bool
+	for _, r := range listResp.Requests {
+		if r.Approvals == nil {
+			t.Fatalf("request %s returned nil approvals instead of empty slice", r.ID)
+		}
+		if r.ID == reqDetail.ID && len(r.Approvals) == 2 {
+			sawSubmitted = true
+		}
+		if r.Status == migration.ReqStatusDraft && len(r.Approvals) == 0 {
+			sawDraft = true
+		}
+	}
+	if !sawSubmitted || !sawDraft {
+		t.Fatalf("GET /requests did not hydrate approvals as expected: sawSubmitted=%v sawDraft=%v", sawSubmitted, sawDraft)
 	}
 }

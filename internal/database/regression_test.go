@@ -4,8 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"sort"
 	"strings"
 	"testing"
+
+	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/migrations"
 )
 
 func TestSanitizeConnectionError(t *testing.T) {
@@ -51,5 +55,35 @@ func TestMySQLJSONJoinStrategies(t *testing.T) {
 				t.Fatal("query container or first table incorrectly labeled as a join")
 			}
 		})
+	}
+}
+
+func TestEmbeddedPlatformMigrations(t *testing.T) {
+	files, err := fs.Glob(migrations.PlatformFS, "platform/*.sql")
+	if err != nil {
+		t.Fatalf("glob embedded platform migrations: %v", err)
+	}
+	sort.Strings(files)
+	expected := []string{
+		"platform/001_init_platform.sql",
+		"platform/002_migration_core.sql",
+		"platform/003_session_rotation_clock.sql",
+		"platform/004_session_grace_tokens.sql",
+		"platform/005_m2_schema.sql",
+	}
+	if len(files) < len(expected) {
+		t.Fatalf("got %d embedded migrations (%v), want at least %v", len(files), files, expected)
+	}
+	for i, want := range expected {
+		if files[i] != want {
+			t.Fatalf("embedded migration[%d] = %q, want %q (all=%v)", i, files[i], want, files)
+		}
+		raw, err := fs.ReadFile(migrations.PlatformFS, files[i])
+		if err != nil {
+			t.Fatalf("read %s: %v", files[i], err)
+		}
+		if len(strings.TrimSpace(string(raw))) == 0 {
+			t.Fatalf("embedded migration %s is empty", files[i])
+		}
 	}
 }

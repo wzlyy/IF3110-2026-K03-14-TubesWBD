@@ -51,6 +51,8 @@ type Index struct {
 	Name, Type, Definition string
 	Columns                []string
 	Unique, Primary        bool
+	Partial                bool `json:"-"`
+	Invalid                bool `json:"-"`
 }
 
 var (

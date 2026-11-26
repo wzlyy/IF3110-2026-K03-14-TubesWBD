@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/database"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/lock"
@@ -15,10 +16,11 @@ import (
 )
 
 type Service struct {
-	DB       *sql.DB
-	Targets  *database.TargetManager
-	Locks    *lock.Manager
-	WorkerID string
+	DB        *sql.DB
+	Targets   *database.TargetManager
+	Locks     *lock.Manager
+	WorkerID  string
+	processFn func(context.Context, queue.JobMessage) error
 }
 type attempt struct {
 	s                     *Service
@@ -26,6 +28,7 @@ type attempt struct {
 	d                     *migration.Definition
 	snapshot, root, token string
 	dbName, actor         string
+	started               time.Time
 	target                *telemetry.InstrumentedDB
 }
 
@@ -35,6 +38,14 @@ func (a *attempt) withTelemetry(ctx context.Context) context.Context {
 	}
 	if a.actor != "" {
 		ctx = telemetry.WithActor(ctx, a.actor)
+	}
+	if a.j.ExecutionID != "" || a.j.JobID != "" || a.j.MigrationID != "" {
+		ctx = telemetry.WithJobMeta(ctx, telemetry.JobLogMeta{
+			MigrationID: a.j.MigrationID,
+			JobID:       a.j.JobID,
+			ExecutionID: a.j.ExecutionID,
+			Attempt:     a.j.AttemptNumber,
+		})
 	}
 	return ctx
 }
@@ -142,17 +153,21 @@ func (a *attempt) record(ctx context.Context, status string, cause error) error 
 		msg = telemetry.RedactString(cause.Error())
 		state = telemetry.ExtractSQLState(cause)
 	}
-	_, e = tx.ExecContext(ctx, `INSERT INTO migration_executions(execution_id,request_id,job_id,database_id,migration_id,migration_version,migration_revision,migration_name,action_type,reverted_execution_id,parent_execution_id,attempt_number,executed_by,executed_sql_snapshot,execution_mode,status,error_message,error_sqlstate,trace_id,finished_at)
+	insRes, e := tx.ExecContext(ctx, `INSERT INTO migration_executions(execution_id,request_id,job_id,database_id,migration_id,migration_version,migration_revision,migration_name,action_type,reverted_execution_id,parent_execution_id,attempt_number,executed_by,executed_sql_snapshot,execution_mode,status,error_message,error_sqlstate,trace_id,finished_at)
  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NULLIF($13,''),$14,$15,$16::varchar,$17,$18,$19,CASE WHEN $16::varchar='failed' THEN now() END) ON CONFLICT(execution_id) DO NOTHING`, j.ExecutionID, j.RequestID, j.JobID, j.DatabaseID, j.MigrationID, a.d.Version, a.d.Revision, a.d.Name, j.ActionType, reverted, parent, j.AttemptNumber, j.RequestedBy, a.snapshot, j.ExecutionMode, status, msg, state, traceID)
 	if e != nil {
 		return e
 	}
+	inserted, _ := insRes.RowsAffected()
 	_, e = tx.ExecContext(ctx, "UPDATE migration_requests SET status=$1,updated_at=now() WHERE id=$2 AND job_id=$3 AND status IN ('pending_queue','running')", status, j.RequestID, j.JobID)
 	if e != nil {
 		return e
 	}
 	if err := tx.Commit(); err != nil {
 		return err
+	}
+	if status == "failed" && inserted > 0 {
+		telemetry.GlobalMetrics().RecordJobFinished(j.ActionType, j.ExecutionMode, "failed", 0)
 	}
 	telemetry.LogAudit(ctx, "worker.attempt", status,
 		slog.String("action_type", j.ActionType), slog.Int("version", a.d.Version),

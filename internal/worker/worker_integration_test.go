@@ -236,3 +236,229 @@ func TestWorkerSerialAndParallel(t *testing.T) {
 	f.sum(16)
 	other.sum(8)
 }
+
+func TestWorkerRevalidationFailsOnLeaderOrGrantChange(t *testing.T) {
+	t.Run("leader changed after approval", func(t *testing.T) {
+		f := newFixture(t, "TARGET_PG")
+		otherLeader := uuid.NewString()
+		f.exec(f.s.DB, "INSERT INTO users(id,username,password_hash) VALUES($1,$2,'test')", otherLeader, "leader-"+strings.ReplaceAll(otherLeader, "-", ""))
+		t.Cleanup(func() {
+			_, _ = f.s.DB.Exec("DELETE FROM users WHERE id=$1", otherLeader)
+		})
+
+		j := f.newJob("normal", "UPDATE "+f.table+" SET v=v+1")
+		f.exec(f.s.DB, "UPDATE groups SET leader_user_id=$1 WHERE id=$2", otherLeader, f.group)
+		f.run(j, "failed")
+		f.sum(0)
+		if _, err := f.s.Locks.GetLock(context.Background(), f.dbID); !errors.Is(err, lock.ErrLockNotFound) {
+			t.Fatalf("lock remained after revalidation failure: %v", err)
+		}
+	})
+
+	t.Run("new group granted access after approval", func(t *testing.T) {
+		f := newFixture(t, "TARGET_PG")
+		j := f.newJob("normal", "UPDATE "+f.table+" SET v=v+1")
+
+		extraGroup := uuid.NewString()
+		f.exec(f.s.DB, "INSERT INTO groups(id,name,leader_user_id) VALUES($1,$2,$3)", extraGroup, "extra-"+strings.ReplaceAll(extraGroup, "-", ""), f.user)
+		t.Cleanup(func() {
+			_, _ = f.s.DB.Exec("DELETE FROM groups WHERE id=$1", extraGroup)
+		})
+		f.exec(f.s.DB, "INSERT INTO group_database_grants(group_id,database_id,access_level) VALUES($1,$2,'VIEW_ONLY')", extraGroup, f.dbID)
+
+		f.run(j, "failed")
+		f.sum(0)
+		if _, err := f.s.Locks.GetLock(context.Background(), f.dbID); !errors.Is(err, lock.ErrLockNotFound) {
+			t.Fatalf("lock remained after grant change revalidation failure: %v", err)
+		}
+	})
+}
+
+func TestWorkerBatchCrashRecoveryToHeldPartial(t *testing.T) {
+	f := newFixture(t, "TARGET_PG")
+	ctx := context.Background()
+	j := f.newJob("batch", "UPDATE "+f.table+" SET v=v+1")
+
+	a := attempt{s: &f.s, j: j}
+	if e := a.load(ctx); e != nil {
+		t.Fatal(e)
+	}
+	lease, e := f.s.Locks.Acquire(ctx, f.dbID, "crashed-batch-worker", j.ExecutionID, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	a.token = lease.LockToken
+	if e = a.record(ctx, "running", nil); e != nil {
+		t.Fatal(e)
+	}
+	if e = a.open(ctx); e != nil {
+		t.Fatal(e)
+	}
+	if e = a.metadata(ctx); e != nil {
+		t.Fatal(e)
+	}
+	b, e := a.batchSpec()
+	if e != nil {
+		t.Fatal(e)
+	}
+	var min, max sql.NullString
+	if e = a.target.QueryRowContext(ctx, "SELECT min("+b.col+")::text,max("+b.col+")::text FROM "+b.table).Scan(&min, &max); e != nil {
+		t.Fatal(e)
+	}
+	tx, e := a.targetTx(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, _, e = a.forwardBatch(ctx, tx, b, min, checkpoint{max: max.String}); e != nil {
+		tx.Rollback()
+		t.Fatal(e)
+	}
+	if e = commit(tx); e != nil {
+		t.Fatal(e)
+	}
+	// Crash before syncOne() or finish(), then expire the lease.
+	f.exec(f.s.DB, "UPDATE database_locks SET expires_at=now()-interval '1 second' WHERE database_id=$1", f.dbID)
+
+	if e = f.s.Process(ctx, j); !errors.Is(e, lock.ErrLockBusy) {
+		t.Fatalf("expected ErrLockBusy after recovering crashed batch worker, got %v", e)
+	}
+	var execStatus, reqStatus string
+	var batchesCommitted int
+	var rowsAffected int64
+	if e = f.s.DB.QueryRow(`SELECT e.status,r.status,e.total_batches_committed,e.total_rows_affected FROM migration_executions e JOIN migration_requests r ON r.id=e.request_id WHERE e.execution_id=$1`, j.ExecutionID).
+		Scan(&execStatus, &reqStatus, &batchesCommitted, &rowsAffected); e != nil {
+		t.Fatal(e)
+	}
+	if execStatus != "partial" || reqStatus != "partial" || batchesCommitted != 1 || rowsAffected != 2 {
+		t.Fatalf("unexpected recovered batch state: status=%s/%s batches=%d rows=%d", execStatus, reqStatus, batchesCommitted, rowsAffected)
+	}
+	var syncedCount int
+	if e = f.s.DB.QueryRow(`SELECT count(*) FROM execution_batch_progress WHERE execution_id=$1 AND direction='forward' AND status='committed'`, j.ExecutionID).Scan(&syncedCount); e != nil || syncedCount != 1 {
+		t.Fatalf("expected 1 synced batch checkpoint, got %d err=%v", syncedCount, e)
+	}
+	li, e := f.s.Locks.GetLock(ctx, f.dbID)
+	if e != nil || li.HoldState != lock.StateHeldPartial || li.ExecutionID != j.ExecutionID {
+		t.Fatalf("unexpected lock after batch crash recovery: %+v err=%v", li, e)
+	}
+
+	resume := f.request(j.MigrationID, "batch", "resume_batch", j.ExecutionID)
+	f.run(resume, "success")
+	f.sum(8)
+}
+
+func TestWorkerZeroBatchUnsafeRevertRestoresPartialLock(t *testing.T) {
+	f := newFixture(t, "TARGET_PG")
+	ctx := context.Background()
+	f.exec(f.target, "ALTER TABLE "+f.table+" ADD CONSTRAINT stop_at_five CHECK(id<>5 OR v=0)")
+
+	e1 := f.newJob("batch", "UPDATE "+f.table+" SET v=v+1")
+	f.run(e1, "partial")
+	f.sum(4)
+
+	// Mutate row 4 (in batch 2, the first batch revert_batch touches) so 0 batches revert.
+	f.exec(f.target, "UPDATE "+f.table+" SET v=99 WHERE id=4")
+	e2 := f.request(e1.MigrationID, "batch", "revert_batch", e1.ExecutionID)
+	f.run(e2, "failed")
+
+	li, e := f.s.Locks.GetLock(ctx, f.dbID)
+	if e != nil || li.HoldState != lock.StateHeldPartial || li.ExecutionID != e1.ExecutionID {
+		t.Fatalf("0-batch revert should restore held_partial to E1 (%s), got %+v err=%v", e1.ExecutionID, li, e)
+	}
+
+	// A resume_batch that also commits 0 new batches must likewise restore held_partial to E1.
+	e2r := f.request(e1.MigrationID, "batch", "resume_batch", e1.ExecutionID)
+	f.run(e2r, "failed")
+	li, e = f.s.Locks.GetLock(ctx, f.dbID)
+	if e != nil || li.HoldState != lock.StateHeldPartial || li.ExecutionID != e1.ExecutionID {
+		t.Fatalf("0-batch resume should restore held_partial to E1 (%s), got %+v err=%v", e1.ExecutionID, li, e)
+	}
+
+	f.exec(f.target, "ALTER TABLE "+f.table+" DROP CONSTRAINT stop_at_five")
+	e3 := f.request(e1.MigrationID, "batch", "resume_batch", e1.ExecutionID)
+	f.run(e3, "success")
+	f.sum(106)
+}
+
+func TestWorkerHeldUncertainQueuesAndVerifiesForNextJob(t *testing.T) {
+	f := newFixture(t, "TARGET_PG")
+	ctx := context.Background()
+
+	e1 := f.newJob("normal", "UPDATE "+f.table+" SET v=10")
+	e2 := f.newJob("normal", "UPDATE "+f.table+" SET v=v+1")
+
+	a := attempt{s: &f.s, j: e1}
+	if e := a.load(ctx); e != nil {
+		t.Fatal(e)
+	}
+	lease, e := f.s.Locks.Acquire(ctx, f.dbID, "crashed-uncertain-worker", e1.ExecutionID, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	a.token = lease.LockToken
+	if e = a.record(ctx, "running", nil); e != nil {
+		t.Fatal(e)
+	}
+	if e = a.open(ctx); e != nil {
+		t.Fatal(e)
+	}
+	if e = a.metadata(ctx); e != nil {
+		t.Fatal(e)
+	}
+	if e = a.normal(ctx); e != nil {
+		t.Fatal(e)
+	}
+	f.exec(f.s.DB, "UPDATE database_locks SET hold_state='held_uncertain' WHERE database_id=$1", f.dbID)
+	f.exec(f.s.DB, "UPDATE migration_executions SET status='uncertain' WHERE execution_id=$1", e1.ExecutionID)
+	f.exec(f.s.DB, "UPDATE migration_requests SET status='uncertain' WHERE id=$1", e1.RequestID)
+
+	var realPort int
+	if e = f.s.DB.QueryRow("SELECT port FROM database_connections WHERE id=$1", f.dbID).Scan(&realPort); e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(func() {
+		_, _ = f.s.DB.Exec("UPDATE database_connections SET port=$2 WHERE id=$1", f.dbID, realPort)
+	})
+
+	// Simulate target DB outage: E2 must stay pending_queue instead of failing immediately.
+	f.exec(f.s.DB, "UPDATE database_connections SET port=1 WHERE id=$1", f.dbID)
+	f.s.Targets.Invalidate(f.dbID)
+	if err := f.s.Process(ctx, e2); !errors.Is(err, errVerificationPending) {
+		t.Fatalf("expected errVerificationPending while target unreachable, got %v", err)
+	}
+	var e2ReqStatus string
+	var e2ExecCount int
+	if e = f.s.DB.QueryRow("SELECT status FROM migration_requests WHERE id=$1", e2.RequestID).Scan(&e2ReqStatus); e != nil || e2ReqStatus != "pending_queue" {
+		t.Fatalf("E2 request status = %q err=%v, want pending_queue", e2ReqStatus, e)
+	}
+	if e = f.s.DB.QueryRow("SELECT count(*) FROM migration_executions WHERE execution_id=$1", e2.ExecutionID).Scan(&e2ExecCount); e != nil || e2ExecCount != 0 {
+		t.Fatalf("expected 0 execution rows for queued E2, got %d err=%v", e2ExecCount, e)
+	}
+	if li, err := f.s.Locks.GetLock(ctx, f.dbID); err != nil || li.HoldState != lock.StateHeldUncertain || li.ExecutionID != e1.ExecutionID {
+		t.Fatalf("lock should remain held_uncertain on E1, got %+v err=%v", li, err)
+	}
+
+	// Restore target DB: next delivery of E2 verifies E1, clears lock, and returns ErrLockBusy for retry.
+	f.exec(f.s.DB, "UPDATE database_connections SET port=$2 WHERE id=$1", f.dbID, realPort)
+	f.s.Targets.Invalidate(f.dbID)
+	reopened, _, e := f.s.Targets.Open(ctx, f.dbID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	f.target = reopened
+	t.Cleanup(func() {
+		_, _ = f.target.Exec("DROP TABLE IF EXISTS " + f.table)
+	})
+	if err := f.s.Process(ctx, e2); !errors.Is(err, lock.ErrLockBusy) {
+		t.Fatalf("expected ErrLockBusy after verifying E1 for E2, got %v", err)
+	}
+	var e1Status string
+	if e = f.s.DB.QueryRow("SELECT status FROM migration_executions WHERE execution_id=$1", e1.ExecutionID).Scan(&e1Status); e != nil || e1Status != "success" {
+		t.Fatalf("E1 status = %q err=%v, want success", e1Status, e)
+	}
+	if _, err := f.s.Locks.GetLock(ctx, f.dbID); !errors.Is(err, lock.ErrLockNotFound) {
+		t.Fatalf("expected lock released after E1 verification, got %v", err)
+	}
+
+	f.run(e2, "success")
+	f.sum(88)
+}

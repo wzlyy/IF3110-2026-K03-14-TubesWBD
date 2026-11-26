@@ -1,14 +1,8 @@
 import { useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { api } from "../../api/client";
-import {
-  dbPath,
-  Feedback,
-  linearAllowed,
-  useAction,
-  useCreateRequest,
-  useResource,
-} from "./shared";
+import { useAction, useResource } from "../../components/shared";
+import { dbPath, linearAllowed, useCreateRequest } from "./shared";
 import type { Draft, Definition, Definitions } from "./shared";
 
 const empty: Draft = {
@@ -52,7 +46,7 @@ function Editor({
     };
   });
   const [message, setMessage] = useState("");
-  const { busy, run, error } = useAction();
+  const { busy, run } = useAction();
   const path = dbPath(db) + "/migrations";
   function set<K extends keyof Draft>(k: K, v: Draft[K]) {
     setMessage("");
@@ -184,15 +178,16 @@ function Editor({
         <div className="m2-actions">
           <button
             type="button"
-            onClick={() =>
+            onClick={() => {
+              setMessage("");
               void run(async () => {
                 const result = await api<{ message: string }>(
                   path + "/validate",
                   { method: "POST", body },
                 );
                 setMessage(result.message);
-              })
-            }
+              });
+            }}
           >
             Validasi SQL / Dry-run
           </button>
@@ -202,7 +197,6 @@ function Editor({
           </button>
         </div>
       </fieldset>
-      <Feedback error={error} />
       <p role="status">{message}</p>
     </form>
   );
@@ -242,7 +236,6 @@ export default function MigrationPage() {
           )}
         </div>
       </header>
-      <Feedback error={error || action.error} />
       {editing && data?.access_level === "VIEW_EDIT" && (
         <Editor
           key={editing === "new" ? "new" : editing.id}

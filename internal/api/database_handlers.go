@@ -40,15 +40,18 @@ func (h *DatabaseAPIHandler) ListDatabases(w http.ResponseWriter, r *http.Reques
 
 	rows, err := h.DB.QueryContext(r.Context(), `
 		SELECT dc.id, dc.name, dc.dbms_type, dc.host, dc.port, dc.db_name, dc.username, dc.created_at, dc.updated_at,
-		       COALESCE(dl.hold_state, '')
+		       COALESCE(dl.hold_state, ''),
+		       CASE
+		           WHEN bool_or(gdg.access_level = 'VIEW_EDIT') THEN 'VIEW_EDIT'
+		           ELSE 'VIEW_ONLY'
+		       END AS access_level
 		FROM database_connections dc
+		JOIN group_database_grants gdg ON gdg.database_id = dc.id
+		JOIN user_groups ug ON ug.group_id = gdg.group_id
 		LEFT JOIN database_locks dl ON dl.database_id = dc.id
-		WHERE EXISTS (
-			SELECT 1
-			FROM group_database_grants gdg
-			JOIN user_groups ug ON ug.group_id = gdg.group_id
-			WHERE ug.user_id = $1 AND gdg.database_id = dc.id AND gdg.access_level IN ('VIEW_ONLY', 'VIEW_EDIT')
-		)
+		WHERE ug.user_id = $1
+		  AND gdg.access_level IN ('VIEW_ONLY', 'VIEW_EDIT')
+		GROUP BY dc.id, dc.name, dc.dbms_type, dc.host, dc.port, dc.db_name, dc.username, dc.created_at, dc.updated_at, dl.hold_state
 		ORDER BY dc.name ASC, dc.id ASC
 	`, user.ID)
 	if err != nil {
@@ -60,17 +63,22 @@ func (h *DatabaseAPIHandler) ListDatabases(w http.ResponseWriter, r *http.Reques
 	list := make([]accessibleDatabaseDTO, 0)
 	for rows.Next() {
 		var item accessibleDatabaseDTO
+		var rawLevel string
 		if err := rows.Scan(
 			&item.ID, &item.Name, &item.DBMS, &item.Host, &item.Port,
-			&item.DBName, &item.Username, &item.CreatedAt, &item.UpdatedAt, &item.LockState,
+			&item.DBName, &item.Username, &item.CreatedAt, &item.UpdatedAt, &item.LockState, &rawLevel,
 		); err != nil {
-			continue
+			WriteError(w, http.StatusInternalServerError, "Gagal memuat daftar database")
+			return
 		}
-		level, err := access.GetEffectiveAccess(r.Context(), h.DB, user.ID, item.ID)
-		if err == nil && access.IsHigherOrEqual(level, access.AccessViewOnly) {
-			item.AccessLevel = level
+		item.AccessLevel = access.ParseAccessLevel(rawLevel)
+		if access.IsHigherOrEqual(item.AccessLevel, access.AccessViewOnly) {
 			list = append(list, item)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		WriteError(w, http.StatusInternalServerError, "Gagal memuat daftar database")
+		return
 	}
 	WriteJSON(w, http.StatusOK, map[string]any{"databases": list})
 }

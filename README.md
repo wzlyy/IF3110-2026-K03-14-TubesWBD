@@ -81,6 +81,7 @@ Dalam pengujian restart, worker dimatikan setelah monitor melaporkan tiga checkp
 ```powershell
 go test -p 1 -count=1 ./...
 go vet ./...
+go build ./cmd/server ./cmd/worker ./cmd/seed
 docker compose -p wbd-test -f compose.test.yaml up -d --wait
 .\scripts\test-integration.ps1
 docker compose -p wbd-test -f compose.test.yaml stop
@@ -88,7 +89,7 @@ npm --prefix frontend ci
 npm --prefix frontend run build
 ```
 
-Go mengikuti versi di `go.mod`. Untuk pengembangan SPA jalankan `npm --prefix frontend run dev` di samping API lokal pada port 8080. Vite mem-proxy `/api` ke Go. Image produksi menyalin hasil build ke `/app/frontend/dist`. Kontainer pengujian memakai database dan port khusus. Skenario worker mencakup serialisasi per target, eksekusi paralel dua target, duplicate delivery, partial/resume, kegagalan revert dan pemulihan commit setelah lease kedaluwarsa.
+Go mengikuti versi di `go.mod`. Untuk pengembangan SPA jalankan `npm --prefix frontend run dev` di samping API lokal pada port 8080. Vite mem-proxy `/api` ke Go. Image produksi menyalin hasil build ke `/app/frontend/dist`. Kontainer pengujian memakai database dan port khusus. Skenario worker mencakup serialisasi per target, eksekusi paralel dua target, duplicate delivery, partial/resume, kegagalan revert, revalidasi approval, batch crash recovery, 0-batch unsafe revert, antrean saat `held_uncertain`, dan pemulihan commit setelah lease kedaluwarsa.
 
 Pada 500.000 baris, satu UPDATE membutuhkan **6,155 detik**. Worker batch reversible menyelesaikan **50 × 10.000 baris dalam 16,804 detik**. Pengukuran mencakup satu putaran lokal. [Metode, SQL dan hasil benchmark](docs/batch-benchmark.md)
 

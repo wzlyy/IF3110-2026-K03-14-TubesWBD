@@ -12,6 +12,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
+COPY migrations ./migrations
 RUN CGO_ENABLED=0 go build -o /out/server ./cmd/server && CGO_ENABLED=0 go build -o /out/seed ./cmd/seed
 
 FROM builder AS worker-build
@@ -28,6 +29,5 @@ ENTRYPOINT ["/app/worker"]
 FROM runtime AS api
 COPY --from=builder /out/server /out/seed ./
 COPY --from=frontend /src/dist ./frontend/dist
-COPY migrations ./migrations
 EXPOSE 8080
 ENTRYPOINT ["/app/server"]

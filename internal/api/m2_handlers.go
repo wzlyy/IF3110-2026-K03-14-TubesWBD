@@ -108,6 +108,7 @@ func (h *M2APIHandler) ListDefinitions(w http.ResponseWriter, r *http.Request) {
 		"definitions":            defs,
 		"active_tip":             state.ActiveTip,
 		"blocking_execution":     state.BlockingExecution,
+		"blocking_allows_repair": state.BlockingAllowsRepair,
 		"applied_migration_ids":  state.AppliedMigrationIDs,
 		"rolled_back_migrations": state.RolledBackMigrations,
 		"failed_migrations":      state.FailedMigrations,
@@ -365,25 +366,6 @@ func (h *M2APIHandler) EnqueueRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	WriteJSON(w, http.StatusAccepted, res)
-}
-
-func (h *M2APIHandler) CancelRequest(w http.ResponseWriter, r *http.Request) {
-	reqID := r.PathValue("request_id")
-	existing, err := migration.GetRequestDetail(r.Context(), h.DB, reqID)
-	if err != nil {
-		HandleDomainError(w, err)
-		return
-	}
-	user, _, ctx, ok := h.requireDBAccess(w, r, existing.DatabaseID, access.AccessViewEdit)
-	if !ok {
-		return
-	}
-	detail, err := migration.CancelRequest(ctx, h.DB, reqID, user.ID)
-	if err != nil {
-		HandleDomainError(w, err)
-		return
-	}
-	WriteJSON(w, http.StatusOK, detail)
 }
 
 // --- Riwayat (+ Hide rollback) dan Pemantauan Job/Eksekusi ---

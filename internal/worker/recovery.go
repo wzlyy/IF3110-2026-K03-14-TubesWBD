@@ -11,6 +11,7 @@ import (
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/migration"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/queue"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/telemetry"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func (a *attempt) open(ctx context.Context) error {
@@ -47,6 +48,9 @@ func (a *attempt) finish(ctx context.Context, status string, cause error, restor
 	if cause != nil {
 		msg = telemetry.RedactString(cause.Error())
 		state = telemetry.ExtractSQLState(cause)
+		if status != "pending_queue" {
+			telemetry.RecordSpanError(trace.SpanFromContext(ctx), cause)
+		}
 	}
 	attemptStatus := status
 	if status == "pending_queue" {
@@ -63,10 +67,12 @@ func (a *attempt) finish(ctx context.Context, status string, cause error, restor
 	switch {
 	case status == "uncertain":
 		_, e = tx.ExecContext(ctx, "UPDATE database_locks SET hold_state='held_uncertain' WHERE database_id=$1", a.j.DatabaseID)
-	case status == "partial" || status == "partially_reverted" || restoreParent:
+	case status == "partial" || status == "partially_reverted" || restoreParent || (attemptStatus == "failed" && a.repairTarget != ""):
 		owner := a.j.ExecutionID
 		if restoreParent {
 			owner = a.j.TargetExecutionID
+		} else if attemptStatus == "failed" && a.repairTarget != "" {
+			owner = a.repairTarget
 		}
 		_, e = tx.ExecContext(ctx, "UPDATE database_locks SET hold_state='held_partial',execution_id=$2 WHERE database_id=$1", a.j.DatabaseID, owner)
 	default:
@@ -120,7 +126,7 @@ func (a *attempt) inspect(ctx context.Context) (string, error) {
 	if a.j.ExecutionMode == "batch" {
 		dir := "forward"
 		owner := "forward_execution"
-		if a.j.ActionType == "revert_batch" {
+		if a.j.ActionType == "revert_batch" || a.j.ActionType == "rollback" {
 			dir = "revert"
 			owner = "revert_execution"
 		}
@@ -268,6 +274,17 @@ func (s *Service) Process(ctx context.Context, j queue.JobMessage) error {
 		}
 		return lock.ErrLockBusy
 	}
+	if errors.Is(e, lock.ErrLockHeldPartial) && j.ActionType == migration.ActionUp {
+		if info, le := s.Locks.GetLock(ctx, j.DatabaseID); le == nil && info.HoldState == lock.StateHeldPartial {
+			canRepair, blockerMigID, blockerVer, qerr := migration.CanExecutionBeRepaired(ctx, s.DB, j.DatabaseID, info.ExecutionID)
+			if qerr == nil && canRepair && a.d.ID != blockerMigID && a.d.Version > blockerVer {
+				lease, e = s.Locks.AcquireForRecoveryOrResume(ctx, j.DatabaseID, s.WorkerID, j.ExecutionID, info.ExecutionID, 0)
+				if e == nil {
+					a.repairTarget = info.ExecutionID
+				}
+			}
+		}
+	}
 	if errors.Is(e, lock.ErrLockHeldUncertain) || errors.Is(e, lock.ErrLockHeldPartial) || a.continuation() && errors.Is(e, lock.ErrLockBusy) {
 		info, le := s.Locks.GetLock(ctx, j.DatabaseID)
 		if le != nil {
@@ -327,6 +344,8 @@ func (s *Service) Process(ctx context.Context, j queue.JobMessage) error {
 	if e = a.record(ctx, "running", nil); e != nil {
 		if a.continuation() {
 			_, _ = s.DB.ExecContext(ctx, "UPDATE database_locks SET hold_state='held_partial',execution_id=$3 WHERE database_id=$1 AND lock_token=$2", j.DatabaseID, a.token, j.TargetExecutionID)
+		} else if a.repairTarget != "" {
+			_, _ = s.DB.ExecContext(ctx, "UPDATE database_locks SET hold_state='held_partial',execution_id=$3 WHERE database_id=$1 AND lock_token=$2", j.DatabaseID, a.token, a.repairTarget)
 		} else {
 			_ = s.Locks.Release(ctx, j.DatabaseID, a.token)
 		}

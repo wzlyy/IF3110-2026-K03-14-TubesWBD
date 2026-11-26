@@ -46,6 +46,7 @@ type ExecutionRecord struct {
 	ExecutedByUsername    string     `json:"executed_by_username"`
 	ExecutedSQLSnapshot   string     `json:"executed_sql_snapshot"`
 	ExecutionMode         string     `json:"execution_mode"`
+	IsIrreversible        bool       `json:"is_irreversible,omitempty"`
 	Status                string     `json:"status"`
 	TotalBatchesCommitted int        `json:"total_batches_committed"`
 	TotalRowsAffected     int64      `json:"total_rows_affected"`
@@ -72,13 +73,16 @@ type BatchProgressRecord struct {
 
 // ActiveState menyimpan status LIFO linear database yang dihitung langsung dari riwayat eksekusi.
 type ActiveState struct {
-	HiddenRollbackIDs    map[string]struct{} `json:"-"`
-	ActiveExecutions     []ExecutionRecord   `json:"active_executions"`
-	ActiveTip            *ExecutionRecord    `json:"active_tip,omitempty"`
-	AppliedMigrationIDs  map[string]bool     `json:"applied_migration_ids"`
-	RolledBackMigrations map[string]bool     `json:"rolled_back_migrations"`
-	FailedMigrations     map[string]bool     `json:"failed_migrations"`
-	BlockingExecution    *ExecutionRecord    `json:"blocking_execution,omitempty"`
+	HiddenRollbackIDs           map[string]struct{} `json:"-"`
+	ActiveExecutions            []ExecutionRecord   `json:"active_executions"`
+	ActiveTip                   *ExecutionRecord    `json:"active_tip,omitempty"`
+	AppliedMigrationIDs         map[string]bool     `json:"applied_migration_ids"`
+	RolledBackMigrations        map[string]bool     `json:"rolled_back_migrations"`
+	FailedMigrations            map[string]bool     `json:"failed_migrations"`
+	PartiallyRevertedMigrations map[string]bool     `json:"partially_reverted_migrations,omitempty"`
+	BlockingAllowsRepair        bool                `json:"blocking_allows_repair"`
+	RepairableMigrations        map[string]bool     `json:"repairable_migrations,omitempty"`
+	BlockingExecution           *ExecutionRecord    `json:"blocking_execution,omitempty"`
 }
 
 // HistoryResponse adalah respons untuk GET /api/v1/databases/{database_id}/history.
@@ -178,15 +182,18 @@ func FilterHistory(records []ExecutionRecord, hideRollback bool) ([]ExecutionRec
 func ComputeActiveState(records []ExecutionRecord) ActiveState {
 	hidden, rolledBack := rollbackEffects(records)
 	state := ActiveState{
-		HiddenRollbackIDs:    hidden,
-		ActiveExecutions:     make([]ExecutionRecord, 0),
-		AppliedMigrationIDs:  make(map[string]bool),
-		RolledBackMigrations: rolledBack,
-		FailedMigrations:     make(map[string]bool),
+		HiddenRollbackIDs:           hidden,
+		ActiveExecutions:            make([]ExecutionRecord, 0),
+		AppliedMigrationIDs:         make(map[string]bool),
+		RolledBackMigrations:        rolledBack,
+		FailedMigrations:            make(map[string]bool),
+		PartiallyRevertedMigrations: make(map[string]bool),
+		RepairableMigrations:        make(map[string]bool),
 	}
 
 	// Lacak eksekusi partial yang sudah diselesaikan oleh resume_batch atau revert_batch sukses berikutnya.
 	resolvedPartialIDs := make(map[string]bool)
+	failedRevertTargets := make(map[string]bool)
 	parents := make(map[string]string)
 	for _, r := range records {
 		if r.ParentExecutionID != "" {
@@ -220,21 +227,48 @@ func ComputeActiveState(records []ExecutionRecord) ActiveState {
 			if !resolvedPartialIDs[r.ExecutionID] {
 				recCopy := r
 				state.BlockingExecution = &recCopy
+				if r.Status == ExecStatusPartiallyReverted {
+					state.PartiallyRevertedMigrations[r.MigrationID] = true
+				}
 			}
 		case ExecStatusFailed:
 			if r.ActionType == ActionUp || r.ActionType == ActionForward {
 				state.FailedMigrations[r.MigrationID] = true
+			}
+			if r.ActionType == ActionRevertBatch {
+				if r.ParentExecutionID != "" {
+					failedRevertTargets[r.ParentExecutionID] = true
+				}
+				if r.RevertedExecutionID != "" {
+					failedRevertTargets[r.RevertedExecutionID] = true
+				}
 			}
 		case ExecStatusSuccess:
 			if r.ActionType == ActionRollback || r.ActionType == ActionRevertBatch {
 				continue
 			}
 			if r.ActionType == ActionUp || r.ActionType == ActionForward || r.ActionType == ActionResumeBatch {
+				delete(state.FailedMigrations, r.MigrationID)
+				if r.ActionType == ActionUp && state.BlockingExecution != nil &&
+					(state.BlockingExecution.Status == ExecStatusPartiallyReverted || state.BlockingExecution.Status == ExecStatusPartial) &&
+					r.MigrationVersion > state.BlockingExecution.MigrationVersion {
+					// Migration perbaikan baru yang sukses menuntaskan blokir partial/partially_reverted sebelumnya.
+					state.BlockingExecution = nil
+				}
 				if _, cancelled := hidden[r.ExecutionID]; !cancelled {
 					state.ActiveExecutions = append(state.ActiveExecutions, r)
 					state.AppliedMigrationIDs[r.MigrationID] = true
 				}
 			}
+		}
+	}
+
+	if state.BlockingExecution != nil {
+		b := state.BlockingExecution
+		if b.Status == ExecStatusPartiallyReverted ||
+			(b.Status == ExecStatusPartial && (b.IsIrreversible || failedRevertTargets[b.ExecutionID])) {
+			state.BlockingAllowsRepair = true
+			state.RepairableMigrations[b.MigrationID] = true
 		}
 	}
 
@@ -273,7 +307,7 @@ func ValidateLinearNext(targetDef Definition, allDefs []Definition, state Active
 		if d.ID == targetDef.ID || d.Version >= targetDef.Version {
 			return nil
 		}
-		if !state.AppliedMigrationIDs[d.ID] && (state.RolledBackMigrations[d.ID] || !state.FailedMigrations[d.ID]) {
+		if !state.AppliedMigrationIDs[d.ID] && !state.FailedMigrations[d.ID] && !state.PartiallyRevertedMigrations[d.ID] && !state.RepairableMigrations[d.ID] {
 			return ErrLinearOrderViolation
 		}
 	}
@@ -302,7 +336,7 @@ const executionColumns = `
 	e.migration_version, e.migration_revision, e.migration_name, e.action_type,
 	COALESCE(e.reverted_execution_id, ''), COALESCE(e.parent_execution_id, ''),
 	e.attempt_number, COALESCE(e.executed_by, ''), COALESCE(u.username, 'system'),
-	e.executed_sql_snapshot, e.execution_mode, e.status,
+	e.executed_sql_snapshot, e.execution_mode, COALESCE(d.is_irreversible, FALSE), e.status,
 	e.total_batches_committed, e.total_rows_affected,
 	COALESCE(e.error_message, ''), COALESCE(e.error_sqlstate, ''), COALESCE(e.trace_id, ''),
 	e.started_at, e.finished_at
@@ -315,7 +349,7 @@ func scanExecution(row interface{ Scan(...any) error }) (*ExecutionRecord, error
 		&r.MigrationVersion, &r.MigrationRevision, &r.MigrationName, &r.ActionType,
 		&r.RevertedExecutionID, &r.ParentExecutionID,
 		&r.AttemptNumber, &r.ExecutedBy, &r.ExecutedByUsername,
-		&r.ExecutedSQLSnapshot, &r.ExecutionMode, &r.Status,
+		&r.ExecutedSQLSnapshot, &r.ExecutionMode, &r.IsIrreversible, &r.Status,
 		&r.TotalBatchesCommitted, &r.TotalRowsAffected,
 		&r.ErrorMessage, &r.ErrorSQLState, &r.TraceID,
 		&r.StartedAt, &r.FinishedAt,
@@ -328,11 +362,59 @@ func scanExecution(row interface{ Scan(...any) error }) (*ExecutionRecord, error
 	return &r, nil
 }
 
+// CanExecutionBeRepaired melaporkan apakah eksekusi pemblokir pada held_partial dapat
+// ditangani oleh migration perbaikan baru (status partially_reverted, irreversible partial,
+// atau partial dengan percobaan revert_batch yang gagal permanen).
+func CanExecutionBeRepaired(ctx context.Context, db DBQuerier, databaseID, executionID string) (bool, string, int, error) {
+	var status, migID string
+	var migVer int
+	var isIrreversible bool
+	err := db.QueryRowContext(ctx, `
+		SELECT e.status, e.migration_id, e.migration_version, COALESCE(d.is_irreversible, FALSE)
+		FROM migration_executions e
+		JOIN migration_definitions d ON d.id = e.migration_id
+		WHERE e.execution_id = $1 AND e.database_id = $2
+	`, executionID, databaseID).Scan(&status, &migID, &migVer, &isIrreversible)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, "", 0, nil
+		}
+		return false, "", 0, err
+	}
+	if status == ExecStatusPartiallyReverted {
+		return true, migID, migVer, nil
+	}
+	if status != ExecStatusPartial {
+		return false, migID, migVer, nil
+	}
+	if isIrreversible {
+		return true, migID, migVer, nil
+	}
+	var hasFailedRevert bool
+	err = db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM migration_executions rv
+			JOIN migration_requests r ON r.id = rv.request_id
+			WHERE rv.database_id = $1
+			  AND rv.action_type = 'revert_batch'
+			  AND rv.status = 'failed'
+			  AND r.status = 'failed'
+			  AND (rv.parent_execution_id = $2 OR rv.reverted_execution_id = $2)
+		)
+	`, databaseID, executionID).Scan(&hasFailedRevert)
+	if err != nil {
+		return false, migID, migVer, err
+	}
+	return hasFailedRevert, migID, migVer, nil
+}
+
 // ListAllExecutionsChronological memuat seluruh percobaan append-only databaseID secara menaik.
 func ListAllExecutionsChronological(ctx context.Context, db *sql.DB, databaseID string) ([]ExecutionRecord, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT `+executionColumns+`
 		FROM migration_executions e
+		LEFT JOIN migration_definitions d ON d.id = e.migration_id
 		LEFT JOIN users u ON u.id = e.executed_by
 		WHERE e.database_id = $1
 		ORDER BY e.started_at ASC, e.execution_id ASC
@@ -378,6 +460,7 @@ func GetExecutionDetail(ctx context.Context, db *sql.DB, executionID string) (*E
 	rec, err := scanExecution(db.QueryRowContext(ctx, `
 		SELECT `+executionColumns+`
 		FROM migration_executions e
+		LEFT JOIN migration_definitions d ON d.id = e.migration_id
 		LEFT JOIN users u ON u.id = e.executed_by
 		WHERE e.execution_id = $1
 	`, executionID))
@@ -446,6 +529,7 @@ func GetJobStatus(ctx context.Context, db *sql.DB, jobID string) (*JobStatusView
 	execRec, err := scanExecution(db.QueryRowContext(ctx, `
 		SELECT `+executionColumns+`
 		FROM migration_executions e
+		LEFT JOIN migration_definitions d ON d.id = e.migration_id
 		LEFT JOIN users u ON u.id = e.executed_by
 		WHERE e.job_id = $1
 		ORDER BY e.started_at DESC

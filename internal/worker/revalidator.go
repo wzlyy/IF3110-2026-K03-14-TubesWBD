@@ -12,6 +12,7 @@ import (
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/migration"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/queue"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/telemetry"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Service struct {
@@ -26,6 +27,7 @@ type attempt struct {
 	j                     queue.JobMessage
 	d                     *migration.Definition
 	snapshot, root, token string
+	repairTarget          string
 	dbName, actor         string
 	started               time.Time
 	target                *telemetry.InstrumentedDB
@@ -86,29 +88,33 @@ func (a *attempt) load(ctx context.Context) error {
 	if j.ActionType == "rollback" || j.ActionType == "revert_batch" {
 		a.snapshot = a.d.SQLDown
 	}
-	if a.continuation() {
-		var parentSQL string
-		e = a.s.DB.QueryRowContext(ctx, `WITH RECURSIVE lineage AS (
- SELECT execution_id, parent_execution_id,executed_sql_snapshot,1 AS depth FROM migration_executions WHERE execution_id=$1 AND database_id=$2 AND migration_id=$3
- UNION ALL SELECT p.execution_id,p.parent_execution_id,p.executed_sql_snapshot,l.depth+1 FROM migration_executions p JOIN lineage l ON p.execution_id=l.parent_execution_id)
- SELECT execution_id,executed_sql_snapshot FROM lineage ORDER BY depth DESC LIMIT 1`, j.TargetExecutionID, j.DatabaseID, j.MigrationID).Scan(&a.root, &parentSQL)
-		if e != nil {
-			return e
+	if a.continuation() || (j.ExecutionMode == migration.ModeBatch && j.ActionType == "rollback") {
+		targetID := j.TargetExecutionID
+		if targetID == "" && j.ActionType == "rollback" {
+			records, lerr := migration.ListAllExecutionsChronological(ctx, a.s.DB, j.DatabaseID)
+			if lerr != nil {
+				return lerr
+			}
+			if tip := migration.ComputeActiveState(records).ActiveTip; tip != nil && tip.MigrationID == j.MigrationID {
+				targetID = tip.ExecutionID
+			}
 		}
-		if j.ActionType == "resume_batch" {
-			a.snapshot = parentSQL
-		} else {
-			var action string
-			if e = a.s.DB.QueryRowContext(ctx, "SELECT action_type FROM migration_executions WHERE execution_id=$1", a.root).Scan(&action); e != nil {
+		if targetID != "" {
+			var parentSQL string
+			e = a.s.DB.QueryRowContext(ctx, `WITH RECURSIVE lineage AS (
+ SELECT execution_id, COALESCE(parent_execution_id, reverted_execution_id) AS parent_id, executed_sql_snapshot, 1 AS depth FROM migration_executions WHERE execution_id=$1 AND database_id=$2 AND migration_id=$3
+ UNION ALL SELECT p.execution_id, COALESCE(p.parent_execution_id, p.reverted_execution_id), p.executed_sql_snapshot, l.depth+1 FROM migration_executions p JOIN lineage l ON p.execution_id=l.parent_id)
+ SELECT execution_id, executed_sql_snapshot FROM lineage ORDER BY depth DESC LIMIT 1`, targetID, j.DatabaseID, j.MigrationID).Scan(&a.root, &parentSQL)
+			if e != nil {
 				return e
 			}
-			if action == "rollback" {
-				a.snapshot = a.d.SQLUp
+			if j.ActionType == "resume_batch" {
+				a.snapshot = parentSQL
 			}
 		}
 	}
 	if j.ExecutionMode == migration.ModeBatch {
-		if plan, perr := migration.ParseBatchUpdateSQL(a.snapshot, a.d.BatchTable, a.d.BatchCursorColumn); perr == nil {
+		if plan, perr := migration.ParseWorkerBatchUpdateSQL(a.snapshot, a.d.BatchTable, a.d.BatchCursorColumn); perr == nil {
 			a.snapshot = plan.Statement
 		}
 	}
@@ -187,6 +193,9 @@ func (a *attempt) record(ctx context.Context, status string, cause error) error 
 	}
 	if status == "failed" && inserted > 0 {
 		telemetry.GlobalMetrics().RecordJobFinished(j.ActionType, j.ExecutionMode, "failed", 0)
+	}
+	if status == "failed" && cause != nil {
+		telemetry.RecordSpanError(trace.SpanFromContext(ctx), cause)
 	}
 	telemetry.LogAudit(ctx, "worker.attempt", status,
 		slog.String("action_type", j.ActionType), slog.Int("version", a.d.Version),

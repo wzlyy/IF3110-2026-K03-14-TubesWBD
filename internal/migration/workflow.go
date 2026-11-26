@@ -14,7 +14,6 @@ import (
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/queue"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -137,7 +136,7 @@ func (s *WorkflowService) CreateRequest(ctx context.Context, databaseID, userID 
 		}
 	}
 
-	if err := s.ValidateRequestPreconditions(ctx, databaseID, def, in, state, lockInfo); err != nil {
+	if err := s.validateRequestPreconditions(ctx, databaseID, def, in, state, lockInfo, true); err != nil {
 		return nil, err
 	}
 
@@ -166,6 +165,7 @@ func (s *WorkflowService) CreateRequest(ctx context.Context, databaseID, userID 
 	return GetRequestDetail(ctx, s.DB, reqID)
 }
 
+// ValidateRequestPreconditions menegakkan kondisi prasyarat request terhadap state eksekusi aktual.
 func (s *WorkflowService) ValidateRequestPreconditions(
 	ctx context.Context,
 	databaseID string,
@@ -173,6 +173,18 @@ func (s *WorkflowService) ValidateRequestPreconditions(
 	in CreateRequestInput,
 	state ActiveState,
 	lockInfo *lock.LockInfo,
+) error {
+	return s.validateRequestPreconditions(ctx, databaseID, def, in, state, lockInfo, false)
+}
+
+func (s *WorkflowService) validateRequestPreconditions(
+	ctx context.Context,
+	databaseID string,
+	def *Definition,
+	in CreateRequestInput,
+	state ActiveState,
+	lockInfo *lock.LockInfo,
+	allowPlannedUp bool,
 ) error {
 	// 1. Periksa status pemblokir (partial, partially_reverted, atau uncertain).
 	if lockInfo != nil && lockInfo.HoldState == lock.StateHeldUncertain {
@@ -186,12 +198,33 @@ func (s *WorkflowService) ValidateRequestPreconditions(
 		if blocking.Status == ExecStatusUncertain {
 			return ErrDatabaseBlocked
 		}
-		// Hanya resume_batch atau revert_batch untuk eksekusi pemblokir yang boleh lanjut.
-		if in.ActionType != ActionResumeBatch && in.ActionType != ActionRevertBatch {
-			return ErrDatabaseBlocked
-		}
-		if in.TargetExecutionID == "" || in.TargetExecutionID != blocking.ExecutionID {
-			return fmt.Errorf("%w: target_execution_id harus merujuk ke eksekusi partial %s", ErrBatchActionInvalid, blocking.ExecutionID)
+		if blocking.Status == ExecStatusPartiallyReverted {
+			// Pembatalan tidak aman: izinkan revert_batch pada eksekusi pemblokir ATAU migration perbaikan baru (up).
+			if in.ActionType == ActionRevertBatch {
+				if in.TargetExecutionID == "" || in.TargetExecutionID != blocking.ExecutionID {
+					return fmt.Errorf("%w: target_execution_id harus merujuk ke eksekusi partial %s", ErrBatchActionInvalid, blocking.ExecutionID)
+				}
+			} else if in.ActionType == ActionUp {
+				if def.ID == blocking.MigrationID || def.Version <= blocking.MigrationVersion {
+					return ErrDatabaseBlocked
+				}
+			} else {
+				return ErrDatabaseBlocked
+			}
+		} else {
+			// Status partial: izinkan resume_batch atau revert_batch untuk eksekusi pemblokir,
+			// serta migration perbaikan baru (up) bila pembatalan batch tidak aman / irreversible.
+			if in.ActionType == ActionResumeBatch || in.ActionType == ActionRevertBatch {
+				if in.TargetExecutionID == "" || in.TargetExecutionID != blocking.ExecutionID {
+					return fmt.Errorf("%w: target_execution_id harus merujuk ke eksekusi partial %s", ErrBatchActionInvalid, blocking.ExecutionID)
+				}
+			} else if in.ActionType == ActionUp && state.BlockingAllowsRepair {
+				if def.ID == blocking.MigrationID || def.Version <= blocking.MigrationVersion {
+					return ErrDatabaseBlocked
+				}
+			} else {
+				return ErrDatabaseBlocked
+			}
 		}
 	}
 
@@ -207,7 +240,39 @@ func (s *WorkflowService) ValidateRequestPreconditions(
 		if err != nil {
 			return err
 		}
-		return ValidateLinearNext(*def, allDefs, state)
+		if !allowPlannedUp {
+			return ValidateLinearNext(*def, allDefs, state)
+		}
+		// Saat membuat request baru, migrasi pendahulu yang sudah memiliki request approved/queued/running
+		// diizinkan sebagai antrean berurutan; worker tetap menegakkan ValidateLinearNext saat eksekusi.
+		plannedState := state
+		rows, qerr := s.DB.QueryContext(ctx, `
+			SELECT DISTINCT migration_id
+			FROM migration_requests
+			WHERE database_id = $1 AND action_type IN ('up', 'forward') AND status IN ('approved', 'pending_queue', 'running')
+		`, databaseID)
+		if qerr != nil {
+			return qerr
+		}
+		defer rows.Close()
+		appliedCopy := make(map[string]bool, len(state.AppliedMigrationIDs))
+		for k, v := range state.AppliedMigrationIDs {
+			appliedCopy[k] = v
+		}
+		for rows.Next() {
+			var mid string
+			if serr := rows.Scan(&mid); serr != nil {
+				return serr
+			}
+			if mid != def.ID {
+				appliedCopy[mid] = true
+			}
+		}
+		if rerr := rows.Err(); rerr != nil {
+			return rerr
+		}
+		plannedState.AppliedMigrationIDs = appliedCopy
+		return ValidateLinearNext(*def, allDefs, plannedState)
 
 	case ActionRollback:
 		if def.IsIrreversible {
@@ -288,6 +353,7 @@ func (s *WorkflowService) EnqueueRequest(ctx context.Context, requestID, actorUs
 	var (
 		databaseID        string
 		migrationID       string
+		migVersion        int
 		actionType        string
 		targetExecID      sql.NullString
 		status            string
@@ -295,13 +361,13 @@ func (s *WorkflowService) EnqueueRequest(ctx context.Context, requestID, actorUs
 		batchSizeOverride sql.NullInt32
 	)
 	err = tx.QueryRowContext(ctx, `
-		SELECT r.database_id, r.migration_id, r.action_type, r.target_execution_id,
+		SELECT r.database_id, r.migration_id, d.version, r.action_type, r.target_execution_id,
 		       r.status, d.execution_mode, r.batch_size_override
 		FROM migration_requests r
 		JOIN migration_definitions d ON d.id = r.migration_id
 		WHERE r.id = $1
 		FOR UPDATE
-	`, requestID).Scan(&databaseID, &migrationID, &actionType, &targetExecID, &status, &execMode, &batchSizeOverride)
+	`, requestID).Scan(&databaseID, &migrationID, &migVersion, &actionType, &targetExecID, &status, &execMode, &batchSizeOverride)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrRequestNotFound
@@ -325,7 +391,17 @@ func (s *WorkflowService) EnqueueRequest(ctx context.Context, requestID, actorUs
 			}
 			if li.HoldState == lock.StateHeldPartial &&
 				((actionType != ActionResumeBatch && actionType != ActionRevertBatch) || targetExecID.String != li.ExecutionID) {
-				return nil, ErrDatabaseBlocked
+				allowRepair := false
+				if actionType == ActionUp && li.ExecutionID != "" {
+					canRepair, blockerMigID, blockerVer, qerr := CanExecutionBeRepaired(ctx, tx, databaseID, li.ExecutionID)
+					if qerr != nil {
+						return nil, qerr
+					}
+					allowRepair = canRepair && migrationID != blockerMigID && migVersion > blockerVer
+				}
+				if !allowRepair {
+					return nil, ErrDatabaseBlocked
+				}
 			}
 		} else if lerr != nil && !errors.Is(lerr, lock.ErrLockNotFound) {
 			return nil, lerr
@@ -393,8 +469,7 @@ func (s *WorkflowService) EnqueueRequest(ctx context.Context, requestID, actorUs
 		`, requestID, jobID)
 		compCancel()
 
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+		telemetry.RecordSpanError(span, err)
 		return nil, fmt.Errorf("publish job to queue: %w", err)
 	}
 

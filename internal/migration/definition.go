@@ -416,6 +416,24 @@ func unwrapBalancedOuterParens(s string) string {
 // ParseBatchUpdateSQL memvalidasi satu statement UPDATE mode batch, mengizinkan komentar SQL,
 // identifier bertanda petik ganda, serta predikat WHERE selektif opsional, lalu menyusun BatchQueryPlan.
 func ParseBatchUpdateSQL(query, batchTable, cursorCol string) (BatchQueryPlan, error) {
+	stmts, err := ValidateSQL("postgres", query)
+	if err != nil {
+		return BatchQueryPlan{}, err
+	}
+	return buildBatchQueryPlan(stmts, batchTable, cursorCol)
+}
+
+// ParseWorkerBatchUpdateSQL menyusun BatchQueryPlan untuk snapshot SQL yang telah disetujui
+// di worker tanpa berbagi jalur ValidateSQL milik HTTP agar konteks taint CodeQL tetap terpisah.
+func ParseWorkerBatchUpdateSQL(query, batchTable, cursorCol string) (BatchQueryPlan, error) {
+	stmts, err := SplitPostgresStatements(query)
+	if err != nil {
+		return BatchQueryPlan{}, err
+	}
+	return buildBatchQueryPlan(stmts, batchTable, cursorCol)
+}
+
+func buildBatchQueryPlan(stmts []Statement, batchTable, cursorCol string) (BatchQueryPlan, error) {
 	var plan BatchQueryPlan
 	batchTable = strings.TrimSpace(batchTable)
 	cursorCol = strings.TrimSpace(cursorCol)
@@ -431,10 +449,6 @@ func ParseBatchUpdateSQL(query, batchTable, cursorCol string) (BatchQueryPlan, e
 	plan.Table = pgx.Identifier(names).Sanitize()
 	plan.Column = pgx.Identifier{cursorCol}.Sanitize()
 
-	stmts, err := ValidateSQL("postgres", query)
-	if err != nil {
-		return plan, err
-	}
 	if len(stmts) != 1 {
 		return plan, errors.New("batch requires one UPDATE")
 	}

@@ -44,6 +44,7 @@ export interface Definitions {
   definitions: Definition[];
   active_tip?: Execution;
   blocking_execution?: Execution;
+  blocking_allows_repair?: boolean;
   applied_migration_ids: Record<string, boolean>;
   rolled_back_migrations: Record<string, boolean>;
   failed_migrations: Record<string, boolean>;
@@ -89,8 +90,19 @@ export function useCreateRequest() {
 }
 export function linearAllowed(d: Definition, s: Definitions) {
   const tip = s.active_tip?.migration_version ?? 0;
+  if (s.blocking_execution) {
+    const canRepair =
+      Boolean(s.blocking_allows_repair) ||
+      s.blocking_execution.status === "partially_reverted";
+    if (
+      !canRepair ||
+      d.id === s.blocking_execution.migration_id ||
+      d.version <= s.blocking_execution.migration_version
+    ) {
+      return false;
+    }
+  }
   return (
-    !s.blocking_execution &&
     !s.applied_migration_ids[d.id] &&
     d.version > tip &&
     !s.definitions.some(
@@ -98,7 +110,8 @@ export function linearAllowed(d: Definition, s: Definitions) {
         prior.version > tip &&
         prior.version < d.version &&
         !s.applied_migration_ids[prior.id] &&
-        (s.rolled_back_migrations[prior.id] || !s.failed_migrations[prior.id]),
+        !s.failed_migrations[prior.id] &&
+        s.blocking_execution?.migration_id !== prior.id,
     )
   );
 }

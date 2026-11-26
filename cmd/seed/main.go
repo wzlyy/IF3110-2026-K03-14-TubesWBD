@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
-	"log"
+	"log/slog"
 	"os"
 	"strconv"
 	"time"
@@ -11,17 +11,25 @@ import (
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/auth"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/config"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/database"
+	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/telemetry"
 )
 
+func fatalSeed(logger *slog.Logger, msg string, err error) {
+	logger.Error(msg, slog.String("error", telemetry.RedactString(err.Error())))
+	os.Exit(1)
+}
+
 func main() {
+	logger := telemetry.InitLogger(os.Stdout)
+
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("[SEED] config load failed: %v", err)
+		fatalSeed(logger, "seed config load failed", err)
 	}
 
 	db, err := database.NewPlatformDB(cfg)
 	if err != nil {
-		log.Fatalf("[SEED] platform db connect failed: %v", err)
+		fatalSeed(logger, "seed platform db connect failed", err)
 	}
 	defer db.Close()
 
@@ -29,16 +37,16 @@ func main() {
 	defer cancel()
 
 	if err := database.MigratePlatformDB(ctx, db); err != nil {
-		log.Fatalf("[SEED] platform migrate failed: %v", err)
+		fatalSeed(logger, "seed platform migrate failed", err)
 	}
 	if err := auth.BootstrapPlatformAdmin(ctx, db, cfg.AdminInitialUsername, cfg.AdminInitialPassword); err != nil {
-		log.Fatalf("[SEED] admin bootstrap failed: %v", err)
+		fatalSeed(logger, "seed admin bootstrap failed", err)
 	}
 
 	seedPass := envOr("SEED_USER_PASSWORD", "DevPass!2026")
 	passHash, err := auth.HashPassword(seedPass)
 	if err != nil {
-		log.Fatalf("[SEED] hash password failed: %v", err)
+		fatalSeed(logger, "seed hash password failed", err)
 	}
 
 	users := []struct {
@@ -60,7 +68,7 @@ func main() {
 			RETURNING id
 		`, u.id, u.username, passHash).Scan(&actualID)
 		if err != nil {
-			log.Fatalf("[SEED] upsert user %s failed: %v", u.username, err)
+			fatalSeed(logger, "seed upsert user failed", err)
 		}
 		userIDs[u.username] = actualID
 	}
@@ -84,25 +92,25 @@ func main() {
 			RETURNING id
 		`, g.id, g.name, userIDs[g.leader]).Scan(&actualID)
 		if err != nil {
-			log.Fatalf("[SEED] upsert group %s failed: %v", g.name, err)
+			fatalSeed(logger, "seed upsert group failed", err)
 		}
 		groupIDs[g.name] = actualID
 		for _, m := range g.members {
 			if _, err := db.ExecContext(ctx, `INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, userIDs[m], actualID); err != nil {
-				log.Fatalf("[SEED] add member %s to %s failed: %v", m, g.name, err)
+				fatalSeed(logger, "seed add group member failed", err)
 			}
 		}
 	}
 
 	store, err := database.NewConnectionStore(db, cfg.EncryptionKey)
 	if err != nil {
-		log.Fatalf("[SEED] connection store init failed: %v", err)
+		fatalSeed(logger, "seed connection store init failed", err)
 	}
 
 	pg1Port, _ := strconv.Atoi(envOr("TARGET_PG_PORT", "5433"))
 	pg2Port, _ := strconv.Atoi(envOr("TARGET_PG2_PORT", "5434"))
 
-	db1ID := ensureConnection(ctx, db, store, database.Connection{
+	db1ID := ensureConnection(ctx, logger, db, store, database.Connection{
 		Name:     "target-postgres-1",
 		DBMS:     "postgres",
 		Host:     envOr("TARGET_PG_HOST", "127.0.0.1"),
@@ -111,7 +119,7 @@ func main() {
 		Username: envOr("TARGET_PG_USER", "postgres"),
 	}, envOr("TARGET_PG_PASSWORD", "postgres"))
 
-	db2ID := ensureConnection(ctx, db, store, database.Connection{
+	db2ID := ensureConnection(ctx, logger, db, store, database.Connection{
 		Name:     "target-postgres-2",
 		DBMS:     "postgres",
 		Host:     envOr("TARGET_PG2_HOST", "127.0.0.1"),
@@ -136,14 +144,14 @@ func main() {
 			ON CONFLICT (group_id, database_id) DO UPDATE SET access_level = EXCLUDED.access_level
 		`, groupIDs[gr.group], gr.dbID, gr.level)
 		if err != nil {
-			log.Fatalf("[SEED] assign grant failed: %v", err)
+			fatalSeed(logger, "seed assign grant failed", err)
 		}
 	}
 
-	log.Println("[SEED] Milestone 2 demo users, groups with leaders, target PostgreSQL connections, and grants seeded successfully.")
+	logger.Info("Milestone 2 demo users, groups with leaders, target PostgreSQL connections, and grants seeded successfully.")
 }
 
-func ensureConnection(ctx context.Context, db *sql.DB, store *database.ConnectionStore, conn database.Connection, password string) string {
+func ensureConnection(ctx context.Context, logger *slog.Logger, db *sql.DB, store *database.ConnectionStore, conn database.Connection, password string) string {
 	var existingID string
 	err := db.QueryRowContext(ctx, "SELECT id FROM database_connections WHERE name = $1 LIMIT 1", conn.Name).Scan(&existingID)
 	if err == nil && existingID != "" {
@@ -151,7 +159,7 @@ func ensureConnection(ctx context.Context, db *sql.DB, store *database.Connectio
 	}
 	created, err := store.Create(ctx, conn, password)
 	if err != nil {
-		log.Fatalf("[SEED] create connection %s failed: %v", conn.Name, err)
+		fatalSeed(logger, "seed create connection failed", err)
 	}
 	return created.ID
 }

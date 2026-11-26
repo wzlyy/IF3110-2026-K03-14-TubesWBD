@@ -197,7 +197,6 @@ func TestRegisterRoutesHealthMetricsAndAuthGuard(t *testing.T) {
 		{http.MethodGet, "/api/v1/auth/me"},
 		{http.MethodGet, "/api/v1/databases"},
 		{http.MethodGet, "/api/v1/requests"},
-		{http.MethodPost, "/api/v1/requests/req-1/cancel"},
 		{http.MethodPost, "/api/v1/requests/req-1/enqueue"},
 		{http.MethodGet, "/api/v1/admin/groups"},
 	} {

@@ -11,7 +11,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -150,8 +149,7 @@ func (m *Manager) Acquire(ctx context.Context, databaseID, workerID, executionID
 		ON CONFLICT (database_id) DO NOTHING
 	`, databaseID, token, workerID, executionID, now, expiresAt)
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+		telemetry.RecordSpanError(span, err)
 		return nil, fmt.Errorf("insert database lock: %w", err)
 	}
 	rows, err := res.RowsAffected()

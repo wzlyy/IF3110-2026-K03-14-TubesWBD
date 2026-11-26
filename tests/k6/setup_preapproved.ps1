@@ -39,9 +39,10 @@ $diffDbReqs = @()
 
 for ($i = 1; $i -le $CountPerDB; $i++) {
     # Migrasi pra-persetujuan di DB1 (butuh leader_core & leader_analytics)
+    # Sisipkan beban baris agar durasi eksekusi cukup memicu kontensi distributed lock saat dikirim berpasangan.
     $m1 = Invoke-ApiPost $editor "/api/v1/databases/$db1/migrations" @{
         name     = "k6_same_db_$i"
-        sql_up   = "CREATE TABLE IF NOT EXISTS k6_probe_1_$i (id SERIAL PRIMARY KEY, created_at TIMESTAMPTZ DEFAULT NOW());"
+        sql_up   = "CREATE TABLE IF NOT EXISTS k6_probe_1_$i (id INT PRIMARY KEY, created_at TIMESTAMPTZ DEFAULT NOW()); INSERT INTO k6_probe_1_$i (id) SELECT generate_series(1, 30000) ON CONFLICT DO NOTHING;"
         sql_down = "DROP TABLE IF EXISTS k6_probe_1_$i;"
     }
     $r1 = Invoke-ApiPost $editor "/api/v1/databases/$db1/requests" @{

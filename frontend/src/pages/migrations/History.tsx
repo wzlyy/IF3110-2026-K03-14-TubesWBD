@@ -52,11 +52,13 @@ export default function History() {
   const create = useCreateRequest();
   const s = defs.data;
   const forward =
-    s?.definitions?.filter(
-      (d) =>
-        linearAllowed(d, s) &&
-        (s.rolled_back_migrations[d.id] || s.failed_migrations[d.id]),
-    ) ?? [];
+    s && !s.blocking_execution
+      ? (s.definitions ?? []).filter(
+          (d) =>
+            linearAllowed(d, s) &&
+            (s.rolled_back_migrations[d.id] || s.failed_migrations[d.id]),
+        )
+      : [];
   return (
     <section className="m2">
       <h1>Riwayat eksekusi</h1>

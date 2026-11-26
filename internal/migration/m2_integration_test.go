@@ -597,6 +597,54 @@ func TestM2AuthAdminExplorerBatchValidationAndRejectionIntegration(t *testing.T)
 		t.Fatalf("revert_batch targeting partial execution = %d: %s", rec.Code, rec.Body.String())
 	}
 
+	// 6b. Setelah revert_batch gagal pada partial, migration perbaikan baru (v2 up) diizinkan,
+	//     sedangkan up ulang pada migBatch yang sama tetap ditolak (409).
+	recFailRevReq := env.doJSON(t, http.MethodPost, "/api/v1/databases/"+env.db1ID+"/requests", env.editorSess, map[string]any{
+		"migration_id":        migBatch.ID,
+		"action_type":         "revert_batch",
+		"target_execution_id": partialExecID,
+	})
+	if recFailRevReq.Code != http.StatusCreated {
+		t.Fatalf("create revert_batch req for failure test = %d: %s", recFailRevReq.Code, recFailRevReq.Body.String())
+	}
+	var failRevReq migration.RequestDetail
+	_ = json.Unmarshal(recFailRevReq.Body.Bytes(), &failRevReq)
+	if _, err := env.db.ExecContext(ctx, `UPDATE migration_requests SET status = 'failed' WHERE id = $1`, failRevReq.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.db.ExecContext(ctx, `
+		INSERT INTO migration_executions (
+			execution_id, request_id, job_id, database_id, migration_id,
+			migration_version, migration_revision, migration_name, action_type,
+			reverted_execution_id, parent_execution_id, executed_by,
+			executed_sql_snapshot, execution_mode, status
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'revert_batch', $9, $9, $10, $11, 'batch', 'failed')
+	`, uuid.NewString(), failRevReq.ID, uuid.NewString(), env.db1ID, migBatch.ID, migBatch.Version, migBatch.Revision, migBatch.Name, partialExecID, env.editorUserID, migBatch.SQLDown); err != nil {
+		t.Fatal(err)
+	}
+	recRepairDef := env.doJSON(t, http.MethodPost, "/api/v1/databases/"+env.db1ID+"/migrations", env.editorSess, map[string]any{
+		"name":     "repair_after_unsafe_revert",
+		"sql_up":   "UPDATE public.m2_batch_orders SET status = 'repaired';",
+		"sql_down": "UPDATE public.m2_batch_orders SET status = 'pending';",
+	})
+	if recRepairDef.Code != http.StatusCreated {
+		t.Fatalf("create repair migration = %d: %s", recRepairDef.Code, recRepairDef.Body.String())
+	}
+	var repairDef migration.Definition
+	_ = json.Unmarshal(recRepairDef.Body.Bytes(), &repairDef)
+	if rec := env.doJSON(t, http.MethodPost, "/api/v1/databases/"+env.db1ID+"/requests", env.editorSess, map[string]any{
+		"migration_id": migBatch.ID,
+		"action_type":  "up",
+	}); rec.Code != http.StatusConflict {
+		t.Fatalf("same-migration up while partial exists = %d, want 409", rec.Code)
+	}
+	if rec := env.doJSON(t, http.MethodPost, "/api/v1/databases/"+env.db1ID+"/requests", env.editorSess, map[string]any{
+		"migration_id": repairDef.ID,
+		"action_type":  "up",
+	}); rec.Code != http.StatusCreated {
+		t.Fatalf("repair migration up after failed revert_batch = %d: %s", rec.Code, rec.Body.String())
+	}
+
 	// 7. GET /api/v1/requests memuat persetujuan secara batch (mengisi 2 approval untuk submitted dan [] untuk draft).
 	recReqs := env.doJSON(t, http.MethodGet, "/api/v1/requests", env.viewerSess, nil)
 	if recReqs.Code != http.StatusOK {
@@ -628,7 +676,7 @@ func TestM2AuthAdminExplorerBatchValidationAndRejectionIntegration(t *testing.T)
 	}
 }
 
-func TestM2FixesApprovalsCancelLinearOrderMetricsAndAdminGuards(t *testing.T) {
+func TestM2FixesApprovalsRejectLinearOrderMetricsAndAdminGuards(t *testing.T) {
 	env := setupM2IntegrationEnv(t)
 	ctx := context.Background()
 
@@ -667,7 +715,7 @@ func TestM2FixesApprovalsCancelLinearOrderMetricsAndAdminGuards(t *testing.T) {
 		t.Fatalf("out-of-order up on v2 before v1 = %d, want 409", recSkip.Code)
 	}
 
-	// 3. Stale approvals + bad comment JSON 400 + resubmit (approved_at cleared) + cancel unblocking edit.
+	// 3. Stale approvals + bad comment JSON 400 + resubmit (approved_at cleared) + leader reject unblocking edit.
 	recReq := env.doJSON(t, http.MethodPost, "/api/v1/databases/"+env.db1ID+"/requests", env.editorSess, map[string]any{
 		"migration_id": mig1.ID, "action_type": "up",
 	})
@@ -742,25 +790,65 @@ func TestM2FixesApprovalsCancelLinearOrderMetricsAndAdminGuards(t *testing.T) {
 		t.Fatalf("unexpected resubmitted req: status=%s approvedAt=%v stale=%v approvals=%d", req.Status, req.ApprovedAt, req.ApprovalStale, len(req.Approvals))
 	}
 
-	// Cancel -> rejected, dan definisi kembali bisa diedit.
+	// Penolakan leader -> status menjadi rejected, dan definisi kembali bisa diedit.
 	if recPut := env.doJSON(t, http.MethodPut, "/api/v1/databases/"+env.db1ID+"/migrations/"+mig1.ID, env.editorSess, map[string]any{
 		"name": "m1_edit_blocked", "sql_up": "CREATE TABLE lin_t1(id INT);", "sql_down": "DROP TABLE lin_t1;",
 	}); recPut.Code != http.StatusConflict {
 		t.Fatalf("edit with active request = %d, want 409", recPut.Code)
 	}
-	recCan := env.doJSON(t, http.MethodPost, "/api/v1/requests/"+req.ID+"/cancel", env.editorSess, nil)
-	if recCan.Code != http.StatusOK {
-		t.Fatalf("cancel request = %d: %s", recCan.Code, recCan.Body.String())
+	recRej := env.doJSON(t, http.MethodPost, "/api/v1/requests/"+req.ID+"/reject", env.leaderCoreSess, map[string]string{"comment": "reject to revise draft"})
+	if recRej.Code != http.StatusOK {
+		t.Fatalf("reject request = %d: %s", recRej.Code, recRej.Body.String())
 	}
 	req = migration.RequestDetail{}
-	_ = json.Unmarshal(recCan.Body.Bytes(), &req)
+	_ = json.Unmarshal(recRej.Body.Bytes(), &req)
 	if req.Status != migration.ReqStatusRejected {
-		t.Fatalf("after cancel status=%s, want rejected", req.Status)
+		t.Fatalf("after reject status=%s, want rejected", req.Status)
 	}
 	if recPut := env.doJSON(t, http.MethodPut, "/api/v1/databases/"+env.db1ID+"/migrations/"+mig1.ID, env.editorSess, map[string]any{
 		"name": "m1_edited", "sql_up": "CREATE TABLE lin_t1(id INT);", "sql_down": "DROP TABLE lin_t1;",
 	}); recPut.Code != http.StatusOK {
-		t.Fatalf("edit after cancel = %d: %s", recPut.Code, recPut.Body.String())
+		t.Fatalf("edit after reject = %d: %s", recPut.Code, recPut.Body.String())
+	}
+
+	// 3b. Planned up (v1 approved, v2 CreateRequest) diizinkan di API, namun ValidateRequestPreconditions
+	//     tetap menolak v2 dengan ErrLinearOrderViolation sampai v1 benar-benar tereksekusi sukses.
+	reqV1Plan := env.doJSON(t, http.MethodPost, "/api/v1/databases/"+env.db1ID+"/requests", env.editorSess, map[string]any{
+		"migration_id": mig1.ID, "action_type": "up",
+	})
+	if reqV1Plan.Code != http.StatusCreated {
+		t.Fatalf("create req v1 plan = %d: %s", reqV1Plan.Code, reqV1Plan.Body.String())
+	}
+	var reqV1 migration.RequestDetail
+	_ = json.Unmarshal(reqV1Plan.Body.Bytes(), &reqV1)
+	if _, err := env.db.ExecContext(ctx, `UPDATE migration_requests SET status = 'approved' WHERE id = $1`, reqV1.ID); err != nil {
+		t.Fatal(err)
+	}
+	recPlanV2 := env.doJSON(t, http.MethodPost, "/api/v1/databases/"+env.db1ID+"/requests", env.editorSess, map[string]any{
+		"migration_id": mig2.ID, "action_type": "up",
+	})
+	if recPlanV2.Code != http.StatusCreated {
+		t.Fatalf("create planned req v2 with v1 approved = %d: %s", recPlanV2.Code, recPlanV2.Body.String())
+	}
+	var reqV2 migration.RequestDetail
+	_ = json.Unmarshal(recPlanV2.Body.Bytes(), &reqV2)
+	wf := &migration.WorkflowService{DB: env.db}
+	allDefs, err := migration.ListDefinitions(ctx, env.db, env.db1ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var def2 *migration.Definition
+	for i := range allDefs {
+		if allDefs[i].ID == mig2.ID {
+			def2 = &allDefs[i]
+			break
+		}
+	}
+	if err := wf.ValidateRequestPreconditions(ctx, env.db1ID, def2, migration.CreateRequestInput{MigrationID: mig2.ID, ActionType: migration.ActionUp}, migration.ComputeActiveState(nil), nil); err != migration.ErrLinearOrderViolation {
+		t.Fatalf("strict ValidateRequestPreconditions on v2 before v1 executed = %v, want ErrLinearOrderViolation", err)
+	}
+	if _, err := env.db.ExecContext(ctx, `DELETE FROM migration_requests WHERE id IN ($1, $2)`, reqV1.ID, reqV2.ID); err != nil {
+		t.Fatal(err)
 	}
 
 	// 4. ActionUp ditolak (422) jika migrasi pernah di-rollback (harus forward).

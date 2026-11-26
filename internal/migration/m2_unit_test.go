@@ -593,3 +593,138 @@ func TestValidateLinearNextBlocksDraftSkippingAndOutOfOrder(t *testing.T) {
 		t.Fatalf("forwarding v2 below active tip v3 should fail with ErrLinearOrderViolation, got %v", err)
 	}
 }
+
+func TestFailedForwardAfterRollbackDoesNotBlockNextMigration(t *testing.T) {
+	defs := []Definition{
+		{ID: "mig-1", Version: 1, Name: "v1"},
+		{ID: "mig-2", Version: 2, Name: "v2"},
+	}
+	base := time.Date(2026, 11, 27, 1, 0, 0, 0, time.UTC)
+
+	// v1 rolled back after a prior failure should still block v2 until a new forward attempt fails.
+	stRolledBack := ComputeActiveState([]ExecutionRecord{
+		{ExecutionID: "E0", MigrationID: "mig-1", MigrationVersion: 1, ActionType: ActionUp, Status: ExecStatusFailed, StartedAt: base},
+		{ExecutionID: "E1", MigrationID: "mig-1", MigrationVersion: 1, ActionType: ActionUp, Status: ExecStatusSuccess, StartedAt: base.Add(time.Minute)},
+		{ExecutionID: "E2", MigrationID: "mig-1", MigrationVersion: 1, ActionType: ActionRollback, RevertedExecutionID: "E1", Status: ExecStatusSuccess, StartedAt: base.Add(2 * time.Minute)},
+	})
+	if err := ValidateLinearNext(defs[1], defs, stRolledBack); !errors.Is(err, ErrLinearOrderViolation) {
+		t.Fatalf("rolled-back v1 without failed forward should block v2, got %v", err)
+	}
+
+	// Once forward on v1 fails, v1 can be retried OR v2 can proceed.
+	stFailedForward := ComputeActiveState([]ExecutionRecord{
+		{ExecutionID: "E1", MigrationID: "mig-1", MigrationVersion: 1, ActionType: ActionUp, Status: ExecStatusSuccess, StartedAt: base},
+		{ExecutionID: "E2", MigrationID: "mig-1", MigrationVersion: 1, ActionType: ActionRollback, RevertedExecutionID: "E1", Status: ExecStatusSuccess, StartedAt: base.Add(time.Minute)},
+		{ExecutionID: "E3", MigrationID: "mig-1", MigrationVersion: 1, ActionType: ActionForward, Status: ExecStatusFailed, StartedAt: base.Add(2 * time.Minute)},
+	})
+	if err := ValidateLinearForward(defs[0], defs, stFailedForward); err != nil {
+		t.Fatalf("expected failed forward v1 to remain forwardable, got %v", err)
+	}
+	if err := ValidateLinearNext(defs[1], defs, stFailedForward); err != nil {
+		t.Fatalf("expected failed forward v1 not to block v2, got %v", err)
+	}
+}
+
+func TestPartiallyRevertedAllowsRepairMigrationUpAndResolvesBlocker(t *testing.T) {
+	defs := []Definition{
+		{ID: "mig-1", Version: 1, Name: "v1"},
+		{ID: "mig-2", Version: 2, Name: "v2"},
+		{ID: "mig-3", Version: 3, Name: "v3-repair"},
+	}
+	records := []ExecutionRecord{
+		{ExecutionID: "E1", MigrationID: "mig-1", MigrationVersion: 1, ActionType: ActionUp, Status: ExecStatusSuccess},
+		{ExecutionID: "E2", MigrationID: "mig-2", MigrationVersion: 2, ActionType: ActionUp, ExecutionMode: ModeBatch, Status: ExecStatusPartial},
+		{ExecutionID: "E3", MigrationID: "mig-2", MigrationVersion: 2, ActionType: ActionRevertBatch, ParentExecutionID: "E2", ExecutionMode: ModeBatch, Status: ExecStatusPartiallyReverted},
+	}
+	stBlocked := ComputeActiveState(records)
+	if stBlocked.BlockingExecution == nil || stBlocked.BlockingExecution.ExecutionID != "E3" {
+		t.Fatalf("expected E3 to be blocking execution, got %#v", stBlocked.BlockingExecution)
+	}
+	if err := ValidateLinearNext(defs[2], defs, stBlocked); err != nil {
+		t.Fatalf("expected repair migration v3 to pass ValidateLinearNext after partially_reverted v2, got %v", err)
+	}
+
+	stRepaired := ComputeActiveState(append(records, ExecutionRecord{
+		ExecutionID: "E4", MigrationID: "mig-3", MigrationVersion: 3, ActionType: ActionUp, Status: ExecStatusSuccess,
+	}))
+	if stRepaired.BlockingExecution != nil {
+		t.Fatalf("expected successful repair migration to clear BlockingExecution, got %#v", stRepaired.BlockingExecution)
+	}
+	if stRepaired.ActiveTip == nil || stRepaired.ActiveTip.ExecutionID != "E4" {
+		t.Fatalf("expected ActiveTip E4, got %#v", stRepaired.ActiveTip)
+	}
+}
+
+func TestParseWorkerBatchUpdateSQLMatchesHTTPParser(t *testing.T) {
+	q := `UPDATE "public"."orders" SET status = 'archived' WHERE status = 'pending'`
+	httpPlan, err := ParseBatchUpdateSQL(q, "orders", "id")
+	if err != nil {
+		t.Fatalf("ParseBatchUpdateSQL failed: %v", err)
+	}
+	workerPlan, err := ParseWorkerBatchUpdateSQL(q, "orders", "id")
+	if err != nil {
+		t.Fatalf("ParseWorkerBatchUpdateSQL failed: %v", err)
+	}
+	if httpPlan != workerPlan {
+		t.Fatalf("mismatch between HTTP and worker batch plans: %#v vs %#v", httpPlan, workerPlan)
+	}
+}
+
+func TestPartialIrreversibleAndFailedRevertAllowRepairMigration(t *testing.T) {
+	defs := []Definition{
+		{ID: "mig-1", Version: 1, Name: "v1"},
+		{ID: "mig-2", Version: 2, Name: "v2"},
+		{ID: "mig-3", Version: 3, Name: "v3-repair"},
+	}
+
+	// Reversible partial without failed revert must keep blocking repair migration v3.
+	revPartial := ComputeActiveState([]ExecutionRecord{
+		{ExecutionID: "E1", MigrationID: "mig-1", MigrationVersion: 1, ActionType: ActionUp, Status: ExecStatusSuccess},
+		{ExecutionID: "E2", MigrationID: "mig-2", MigrationVersion: 2, ActionType: ActionUp, ExecutionMode: ModeBatch, IsIrreversible: false, Status: ExecStatusPartial},
+	})
+	if revPartial.BlockingAllowsRepair {
+		t.Fatalf("expected reversible partial without failed revert to disallow repair")
+	}
+	if err := ValidateLinearNext(defs[2], defs, revPartial); !errors.Is(err, ErrLinearOrderViolation) {
+		t.Fatalf("expected ErrLinearOrderViolation for v3 over reversible partial v2, got %v", err)
+	}
+
+	// Irreversible partial allows repair migration v3 and clears blocker once v3 succeeds.
+	irrevRecords := []ExecutionRecord{
+		{ExecutionID: "E1", MigrationID: "mig-1", MigrationVersion: 1, ActionType: ActionUp, Status: ExecStatusSuccess},
+		{ExecutionID: "E2", MigrationID: "mig-2", MigrationVersion: 2, ActionType: ActionUp, ExecutionMode: ModeBatch, IsIrreversible: true, Status: ExecStatusPartial},
+	}
+	irrevState := ComputeActiveState(irrevRecords)
+	if !irrevState.BlockingAllowsRepair {
+		t.Fatalf("expected irreversible partial to allow repair")
+	}
+	if err := ValidateLinearNext(defs[2], defs, irrevState); err != nil {
+		t.Fatalf("expected repair v3 to pass ValidateLinearNext after irreversible partial, got %v", err)
+	}
+	irrevRepaired := ComputeActiveState(append(irrevRecords, ExecutionRecord{
+		ExecutionID: "E3", MigrationID: "mig-3", MigrationVersion: 3, ActionType: ActionUp, Status: ExecStatusSuccess,
+	}))
+	if irrevRepaired.BlockingExecution != nil || irrevRepaired.ActiveTip == nil || irrevRepaired.ActiveTip.ExecutionID != "E3" {
+		t.Fatalf("expected successful repair v3 to clear blocker and become ActiveTip E3, got blocker=%#v tip=%#v", irrevRepaired.BlockingExecution, irrevRepaired.ActiveTip)
+	}
+
+	// Reversible partial with failed revert_batch allows repair migration v3 and clears blocker once v3 succeeds.
+	failedRevertRecords := []ExecutionRecord{
+		{ExecutionID: "E1", MigrationID: "mig-1", MigrationVersion: 1, ActionType: ActionUp, Status: ExecStatusSuccess},
+		{ExecutionID: "E2", MigrationID: "mig-2", MigrationVersion: 2, ActionType: ActionUp, ExecutionMode: ModeBatch, IsIrreversible: false, Status: ExecStatusPartial},
+		{ExecutionID: "E3", MigrationID: "mig-2", MigrationVersion: 2, ActionType: ActionRevertBatch, RevertedExecutionID: "E2", ParentExecutionID: "E2", ExecutionMode: ModeBatch, Status: ExecStatusFailed},
+	}
+	failedRevState := ComputeActiveState(failedRevertRecords)
+	if !failedRevState.BlockingAllowsRepair {
+		t.Fatalf("expected partial with failed revert_batch to allow repair")
+	}
+	if err := ValidateLinearNext(defs[2], defs, failedRevState); err != nil {
+		t.Fatalf("expected repair v3 to pass ValidateLinearNext after failed revert_batch, got %v", err)
+	}
+	failedRevRepaired := ComputeActiveState(append(failedRevertRecords, ExecutionRecord{
+		ExecutionID: "E4", MigrationID: "mig-3", MigrationVersion: 3, ActionType: ActionUp, Status: ExecStatusSuccess,
+	}))
+	if failedRevRepaired.BlockingExecution != nil || failedRevRepaired.ActiveTip == nil || failedRevRepaired.ActiveTip.ExecutionID != "E4" {
+		t.Fatalf("expected successful repair v3 to clear blocker and become ActiveTip E4, got blocker=%#v tip=%#v", failedRevRepaired.BlockingExecution, failedRevRepaired.ActiveTip)
+	}
+}

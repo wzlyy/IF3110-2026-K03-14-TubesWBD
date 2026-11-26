@@ -116,7 +116,7 @@ func (s *Service) delivery(base context.Context, c retryPublisher, d amqp.Delive
 		d.Ack(false)
 		return
 	}
-	span.RecordError(err)
+	telemetry.RecordSpanError(span, err)
 	telemetry.LogAudit(ctx, "worker.delivery.deferred", "deferred",
 		slog.String("action_type", j.ActionType),
 		slog.Int("retry_count", j.RetryCount),

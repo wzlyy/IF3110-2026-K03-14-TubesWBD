@@ -11,9 +11,11 @@ Workflow CodeQL didefinisikan pada [.github/workflows/codeql.yml](../.github/wor
 | `go` | `autobuild` | Seluruh kode sumber Go pada `cmd/server`, `cmd/worker`, `cmd/seed`, serta seluruh paket `internal/*` (`access`, `admin`, `api`, `auth`, `config`, `database`, `lock`, `migration`, `queue`, `telemetry`, `worker`). |
 | `javascript-typescript` | `none` | Seluruh kode SPA React/TypeScript pada `frontend/src/*` serta skrip uji beban k6 pada `tests/k6/stress_test.js`. |
 
-## 2. Temuan Awal dan Keputusan Perbaikan
+## 2. Temuan CodeQL dan Keputusan Perbaikan
 
-Pada pemindaian awal implementasi backend Milestone 2 (commit `64ef0d0`), CodeQL mendeteksi satu temuan keamanan pada pipeline pencatatan log terstruktur Go:
+Sepanjang pengembangan Milestone 2, GitHub CodeQL mendeteksi tiga temuan (satu saat implementasi awal backend, serta dua alert pada tab *Code scanning* di `main` pasca-merge PR #9 dan PR #11):
+
+### 2.1 Temuan 1 — `go/log-injection` (Commit awal `64ef0d0`)
 
 | Atribut | Detail Temuan |
 |---|---|
@@ -25,27 +27,50 @@ Pada pemindaian awal implementasi backend Milestone 2 (commit `64ef0d0`), CodeQL
 | **Keputusan** | **Diperbaiki (*Fixed / Remediated*)** — tidak diabaikan dan tidak di-*dismiss*. |
 | **Commit Perbaikan** | [`6ede7c2`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/commit/6ede7c20fa760f8595a3138260f70217164b722b) (*"fix(security): rekonstruksi atribut slog agar bebas taint log-injection CodeQL"*) |
 
-### Ringkasan Perubahan Perbaikan (`6ede7c2`)
+Ringkasan perbaikan (`6ede7c2`):
+1. **`internal/telemetry/redact.go`**: `SanitizeLogString` menghapus seluruh karakter `\n` dan `\r` dengan string kosong (`""`), dan `RedactParams` menyanitasi cabang `default` dengan `SanitizeLogString(RedactString(fmt.Sprint(v)))`.
+2. **`internal/telemetry/logger.go`**: Seluruh field inti dan metadata job dibersihkan dari `\n` dan `\r`, serta setiap elemen `extra ...slog.Attr` **direkonstruksi ulang** berdasarkan `attr.Value.Kind()` dengan tetap menerapkan `IsSensitiveKey(key)` → `[REDACTED]`.
+3. **Verifikasi regresi**: Unit test `TestRedactionMasksSecretsAndDSNs` pada [`internal/telemetry/telemetry_test.go`](../internal/telemetry/telemetry_test.go) memverifikasi penghapusan `\r`/`\n` dan penyamaran secret.
 
-1. **`internal/telemetry/redact.go`**:
-   - `SanitizeLogString` menghapus seluruh karakter `\n` dan `\r` dengan string kosong (`""`).
-   - `RedactParams` menyanitasi tipe pada cabang `default` dengan `SanitizeLogString(RedactString(fmt.Sprint(v)))`.
-2. **`internal/telemetry/logger.go`**:
-   - Seluruh field inti (`event`, `actor`, `database`, `status`, `correlation_id`, `trace_id`, `span_id`) dan metadata job (`migration_id`, `job_id`, `execution_id`) dibersihkan dari `\n` dan `\r`.
-   - Setiap elemen `extra ...slog.Attr` **direkonstruksi ulang** berdasarkan `attr.Value.Kind()` (`KindString`, `KindInt64`, `KindUint64`, `KindFloat64`, `KindBool`, `KindDuration`, `KindTime`, atau fallback tersanitasi) serta tetap menerapkan `IsSensitiveKey(key)` → `[REDACTED]`, sehingga tidak ada `slog.Attr` mentah yang membawa taint ke `Logger().LogAttrs`.
-3. **Verifikasi regresi**: Unit test `TestRedactionMasksSecretsAndDSNs` pada [`internal/telemetry/telemetry_test.go`](../internal/telemetry/telemetry_test.go) memverifikasi penghapusan `\r`/`\n` dan penyamaran secret DSN/Bearer/cookie/parameter.
+### 2.2 Temuan 2 — Alert #9 `go/sql-injection` (`7ea5343` / PR #9)
 
-## 3. Rekam Jejak Pemindaian Ulang (*Rescan*) Bersih
+| Atribut | Detail Temuan |
+|---|---|
+| **Rule ID** | `go/sql-injection` (*Database query built from user-controlled sources*, CWE-89) |
+| **Severity** | High / Error |
+| **Lokasi** | [`internal/telemetry/sqllog.go:147`](../internal/telemetry/sqllog.go#L147) (`(*InstrumentedTx).ExecContext`, dipanggil dari [`internal/worker/executor_normal.go:20`](../internal/worker/executor_normal.go#L20)) |
+| **Sumber & Aliran Taint** | CodeQL menelusuri input HTTP (`DecodeJSON` di [`internal/api/m2_handlers.go:140`](../internal/api/m2_handlers.go#L140) melalui `ValidateDefinitionInput`, serta `r.PostForm.Get` di [`internal/migration/editor_handlers.go:94,118`](../internal/migration/editor_handlers.go#L94)) ke `migration.ValidateSQL`. Di dalam `ValidateSQL`, closure bersarang `appendStatement` menangkap variabel `query` dan `statements` (*SSA implicit def*), sehingga menghilangkan *1-level call-context sensitivity* dan membuat kembalian `ValidateSQL` di [`internal/worker/executor_normal.go:10`](../internal/worker/executor_normal.go#L10) dianggap tercemar hingga ke `t.Tx.ExecContext` (`sqllog.go:147`). |
+| **Dampak** | Secara fungsional worker hanya mengeksekusi *snapshot* SQL migrasi yang telah disetujui seluruh *group leader* dan bersifat *immutable* di tabel `migration_definitions` (dengan blokir DML/control transaksi dan skema internal `_platform_meta`). Namun jika suatu pemanggil tidak melalui validasi dan approval, eksekusi statement SQL mentah berisiko mengubah atau merusak data pada database target. |
+| **Keputusan** | **Diperbaiki (*Fixed / Remediated*)** — menghilangkan kebocoran taint lintas pemanggil pada `ValidateSQL`. |
+| **Perbaikan** | Menghapus closure `appendStatement` di [`internal/migration/sql.go`](../internal/migration/sql.go) dengan menggantinya menjadi lexer berbasis offset bilangan bulat `lexSQL` (mengembalikan indeks awal/akhir `[]int` dan konstanta kata kunci dari `canonicalSQLKind`), serta memisahkan entry point worker `SplitPostgresStatements` untuk [`internal/worker/executor_normal.go`](../internal/worker/executor_normal.go). |
+| **Commit Perbaikan** | [`9fce00a`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/commit/9fce00a) (*"fix(codeql): fix issue #9 and # 10"*) |
+| **Hasil Rescan** | [`45833937684`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45833937684) (`CodeQL SAST #14`) — **Success / Alert #9 tertutup (0 open alert)** |
 
-| Commit | Konteks | Run ID | Status CodeQL (Go + JS/TS) |
+### 2.3 Temuan 3 — Alert #10 `js/unused-local-variable` (`1311887` / PR #11)
+
+| Atribut | Detail Temuan |
+|---|---|
+| **Rule ID** | `js/unused-local-variable` (*Unused variable, import, function or class*) |
+| **Severity** | Note |
+| **Lokasi** | [`frontend/src/pages/approvals/Review.tsx:44`](../frontend/src/pages/approvals/Review.tsx#L44) |
+| **Sumber & Aliran** | Variabel destrukturisasi `error` pada `const { data: r, error, refresh } = useResource<Change>(path);` tertinggal tidak terpakai setelah `<Feedback>` dihapus pada konsolidasi hook di commit `8c595b4`. |
+| **Dampak** | Tidak berdampak keamanan langsung, namun menurunkan kebersihan kode dan dapat menutupi kesalahan penanganan error lokal bila nanti ada refaktorisasi. |
+| **Keputusan** | **Diperbaiki (*Fixed / Remediated*)** |
+| **Perbaikan** | Menghapus binding `error` yang tidak dipakai menjadi `const { data: r, refresh } = useResource<Change>(path);` di [`frontend/src/pages/approvals/Review.tsx`](../frontend/src/pages/approvals/Review.tsx#L44) dan memverifikasi dengan `tsc --noUnusedLocals --noUnusedParameters`. |
+| **Commit Perbaikan** | [`9fce00a`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/commit/9fce00a) (*"fix(codeql): fix issue #9 and # 10"*) |
+| **Hasil Rescan** | [`45833937684`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45833937684) (`CodeQL SAST #14`) — **Success / Alert #10 tertutup (0 open alert)** |
+
+## 3. Rekam Jejak Pemindaian (*Scan* & *Rescan*)
+
+| Commit / Tahap | Konteks | Run ID | Hasil Scan |
 |---|---|---|---|
-| `6ede7c2` | Branch `fix/m2-codeql-log-sanitization` setelah perbaikan log injection | [`45046275169`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45046275169) | **Success (0 alert)** |
+| `6ede7c2` | Branch `fix/m2-codeql-log-sanitization` setelah perbaikan `go/log-injection` | [`45046275169`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45046275169) | **Success (0 alert)** |
 | `8df59cd` | Merge PR #8 ke `main` (backend M2) | [`45047490984`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45047490984) | **Success (0 alert)** |
-| `7ea5343` | Merge PR #9 ke `main` (backend + worker + SPA React/TS + observabilitas) | [`45200770227`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45200770227) | **Success (0 alert)** |
-| `31027b2` | PR #10 (`fix/m2-log-docs`: penyelarasan SPA React/TS `e5c4930`, skrip k6 `993f209`, & dokumen M2) | [`45608747471`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45608747471) | **Success (0 alert)** |
-| `1eabb21` | Merge PR #10 ke `main` (rescan bersih penuh Go + JS/TS) | [`45609367648`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45609367648) | **Success (0 alert)** |
+| `7ea5343` | Merge PR #9 ke `main` (menambah worker/SPA) | [`45200770227`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45200770227) | Workflow sukses; memunculkan **Alert #9** (`go/sql-injection`) |
+| `1311887` | Merge PR #11 ke `main` (CodeQL SAST #13) | [`45824302384`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45824302384) | Workflow sukses; **Alert #9** (Go) & **Alert #10** (JS/TS) berstatus Open |
+| [`9fce00a`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/commit/9fce00a) | Push perbaikan Alert #9 (`sql.go`, `executor_normal.go`) & Alert #10 (`Review.tsx`) ke `main` (`CodeQL SAST #14`) | [`45833937684`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45833937684) | **Success — 0 open alert; Alert #9 & #10 tertutup** (Go & JS/TS) |
 
-> **Catatan commit pasca-`1eabb21`:** Perubahan kode Go inkremental setelah `1eabb21` (`3970bce` penyeragaman atribut telemetri worker dan `8f807fe` *lazy* koneksi RabbitMQ) tetap melewati sanitasi `telemetry.LogEvent` serta query berparameter `$1`, dan telah lulus penuh pada workflow *Quality checks* (`go vet`, `go build`, `govulncheck`, integration test) di commit `7cc9c00` ([Run `45650226033`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45650226033)). Pada [Run CodeQL `45650226130`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45650226130) (`7cc9c00`), matriks `javascript-typescript` telah **Success (0 alert)**, sedangkan matriks `go` terdampak gangguan layanan GitHub Actions/API sementara (*`Error creating policy`*) sehingga rescan penuh berikutnya diperoleh saat *re-run* atau push commit terbaru ke `main`.
+Verifikasi CI tambahan pada `9fce00a`: workflow *Quality checks #32* (Go `vet`/test, TypeScript check, `vite build`, dan `govulncheck`) turut selesai dengan status **Success** pada [Run `45833937735`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45833937735).
 
 ## 4. Batasan Analisis Statis (SAST)
 

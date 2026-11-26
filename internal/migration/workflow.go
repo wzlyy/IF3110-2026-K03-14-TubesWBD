@@ -64,6 +64,7 @@ type MigrationRequest struct {
 	JobID               string     `json:"job_id,omitempty"`
 	SQLPreview          string     `json:"sql_preview"`
 	IsIrreversible      bool       `json:"is_irreversible"`
+	ApprovalStale       bool       `json:"approval_stale"`
 	CreatedAt           time.Time  `json:"created_at"`
 	SubmittedAt         *time.Time `json:"submitted_at,omitempty"`
 	ApprovedAt          *time.Time `json:"approved_at,omitempty"`
@@ -199,27 +200,14 @@ func (s *WorkflowService) ValidateRequestPreconditions(
 		if state.AppliedMigrationIDs[def.ID] {
 			return ErrMigrationAlreadyActive
 		}
-		// Pastikan tidak melompati versi sebelumnya yang pernah di-rollback.
+		if state.RolledBackMigrations[def.ID] {
+			return fmt.Errorf("%w: gunakan action 'forward' untuk menjalankan ulang migration yang pernah di-rollback", ErrInvalidActionType)
+		}
 		allDefs, err := ListDefinitions(ctx, s.DB, databaseID)
 		if err != nil {
 			return err
 		}
-		activeTipVersion := 0
-		if state.ActiveTip != nil {
-			activeTipVersion = state.ActiveTip.MigrationVersion
-		}
-		for _, d := range allDefs {
-			if d.Version <= activeTipVersion {
-				continue
-			}
-			if d.ID == def.ID {
-				break
-			}
-			if !state.AppliedMigrationIDs[d.ID] && state.RolledBackMigrations[d.ID] {
-				return ErrLinearOrderViolation
-			}
-		}
-		return nil
+		return ValidateLinearNext(*def, allDefs, state)
 
 	case ActionRollback:
 		if def.IsIrreversible {
@@ -494,6 +482,11 @@ func GetRequestDetail(ctx context.Context, db *sql.DB, requestID string) (*Reque
 	if err != nil {
 		return nil, err
 	}
+	stale, err := IsRequestApprovalStale(ctx, db, req.ID, req.DatabaseID, req.Status)
+	if err != nil {
+		return nil, err
+	}
+	req.ApprovalStale = stale
 	return &RequestDetail{
 		MigrationRequest: *req,
 		Approvals:        approvals,
@@ -559,6 +552,11 @@ func ListRequestsForUser(ctx context.Context, db *sql.DB, userID, databaseID str
 		if approvals == nil {
 			approvals = make([]ApprovalRecord, 0)
 		}
+		stale, err := IsRequestApprovalStale(ctx, db, r.ID, r.DatabaseID, r.Status)
+		if err != nil {
+			return nil, err
+		}
+		r.ApprovalStale = stale
 		details = append(details, RequestDetail{
 			MigrationRequest: r,
 			Approvals:        approvals,

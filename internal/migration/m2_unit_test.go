@@ -514,3 +514,82 @@ func TestPartialRollbackContinuationHistory(t *testing.T) {
 		})
 	}
 }
+
+func TestParseBatchUpdateSQLQuotedCommentsSelectiveWhereAndRejections(t *testing.T) {
+	p1, err := ParseBatchUpdateSQL(`UPDATE "public"."orders" /* lead */ SET status = 'archived' WHERE "id" BETWEEN $1 AND $2 -- end`, "orders", "id")
+	if err != nil {
+		t.Fatalf("quoted+comments parse failed: %v", err)
+	}
+	if p1.ExtraWhere != "" || p1.Statement != `UPDATE "public"."orders" SET status = 'archived' WHERE "id" BETWEEN $1 AND $2` && p1.Statement != `UPDATE "orders" SET status = 'archived' WHERE "id" BETWEEN $1 AND $2` {
+		t.Fatalf("unexpected quoted plan: %+v", p1)
+	}
+
+	p2, err := ParseBatchUpdateSQL(`UPDATE orders SET status = 'archived' WHERE status = 'pending' OR retry = true -- trailing`, "orders", "id")
+	if err != nil {
+		t.Fatalf("selective WHERE parse failed: %v", err)
+	}
+	wantStmt := `UPDATE "orders" SET status = 'archived' WHERE ("id" BETWEEN $1 AND $2) AND (status = 'pending' OR retry = true)`
+	if p2.ExtraWhere != `status = 'pending' OR retry = true` || p2.Statement != wantStmt {
+		t.Fatalf("unexpected selective plan: %+v, want statement %q", p2, wantStmt)
+	}
+
+	// Idempotent when parsing the rewritten execution snapshot (e.g. during resume_batch).
+	p2Again, err := ParseBatchUpdateSQL(p2.Statement, "orders", "id")
+	if err != nil {
+		t.Fatalf("re-parse rewritten snapshot failed: %v", err)
+	}
+	if p2Again.ExtraWhere != p2.ExtraWhere || p2Again.Statement != p2.Statement {
+		t.Fatalf("non-idempotent re-parse: %+v vs %+v", p2Again, p2)
+	}
+
+	p3, err := ParseBatchUpdateSQL(`UPDATE orders SET status = 'archived' WHERE orders.tag = 'target'`, "orders", "id")
+	if err != nil || p3.ExtraWhere != `orders.tag = 'target'` {
+		t.Fatalf("table-qualified selective WHERE failed: err=%v plan=%+v", err, p3)
+	}
+
+	for _, badSQL := range []string{
+		`UPDATE orders SET note = $1`,
+		`UPDATE orders SET status = 'x' WHERE tenant_id = $3`,
+		`UPDATE orders SET status = 'x' WHERE active = true RETURNING id`,
+		`UPDATE orders SET status = 'x' WHERE id BETWEEN $1 AND $2 AND a = 1 OR b = 2`,
+		`UPDATE orders SET status = 'x' WHERE ("id" BETWEEN $1 AND $2) AND a = 1 OR b = 2`,
+	} {
+		if _, err := ParseBatchUpdateSQL(badSQL, "orders", "id"); err == nil {
+			t.Fatalf("expected error for invalid batch SQL %q", badSQL)
+		}
+	}
+}
+
+func TestValidateLinearNextBlocksDraftSkippingAndOutOfOrder(t *testing.T) {
+	defs := []Definition{
+		{ID: "mig-1", Version: 1, Name: "v1"},
+		{ID: "mig-2", Version: 2, Name: "v2"},
+		{ID: "mig-3", Version: 3, Name: "v3"},
+	}
+	stV1 := ComputeActiveState([]ExecutionRecord{
+		{ExecutionID: "E1", MigrationID: "mig-1", MigrationVersion: 1, ActionType: ActionUp, Status: ExecStatusSuccess},
+	})
+	if err := ValidateLinearNext(defs[2], defs, stV1); !errors.Is(err, ErrLinearOrderViolation) {
+		t.Fatalf("skipping unexecuted draft v2 should fail with ErrLinearOrderViolation, got %v", err)
+	}
+	if err := ValidateLinearNext(defs[1], defs, stV1); err != nil {
+		t.Fatalf("next draft v2 should succeed, got %v", err)
+	}
+
+	// Failed v2 must not block draft v3, but once v3 succeeds, forwarding v2 out-of-order is rejected.
+	stV1FailV2 := ComputeActiveState([]ExecutionRecord{
+		{ExecutionID: "E1", MigrationID: "mig-1", MigrationVersion: 1, ActionType: ActionUp, Status: ExecStatusSuccess},
+		{ExecutionID: "E2", MigrationID: "mig-2", MigrationVersion: 2, ActionType: ActionUp, Status: ExecStatusFailed, StartedAt: time.Now()},
+	})
+	if err := ValidateLinearNext(defs[2], defs, stV1FailV2); err != nil {
+		t.Fatalf("failed v2 should not block v3 draft, got %v", err)
+	}
+	stV3Active := ComputeActiveState([]ExecutionRecord{
+		{ExecutionID: "E1", MigrationID: "mig-1", MigrationVersion: 1, ActionType: ActionUp, Status: ExecStatusSuccess},
+		{ExecutionID: "E2", MigrationID: "mig-2", MigrationVersion: 2, ActionType: ActionUp, Status: ExecStatusFailed},
+		{ExecutionID: "E3", MigrationID: "mig-3", MigrationVersion: 3, ActionType: ActionUp, Status: ExecStatusSuccess},
+	})
+	if err := ValidateLinearForward(defs[1], defs, stV3Active); !errors.Is(err, ErrLinearOrderViolation) {
+		t.Fatalf("forwarding v2 below active tip v3 should fail with ErrLinearOrderViolation, got %v", err)
+	}
+}

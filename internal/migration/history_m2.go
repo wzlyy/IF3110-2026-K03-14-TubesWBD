@@ -245,10 +245,45 @@ func ComputeActiveState(records []ExecutionRecord) ActiveState {
 	return state
 }
 
+// ValidateLinearNext memeriksa urutan linear migrasi berikutnya (action up maupun forward):
+// 1. targetDef belum terpasang aktif.
+// 2. targetDef.Version harus lebih besar daripada Active Tip saat ini.
+// 3. Migrasi versi lebih kecil setelah Active Tip yang belum terpasang dan bukan sekadar percobaan gagal
+//    (draf yang belum pernah dijalankan atau migrasi yang pernah di-rollback) harus dijalankan lebih dulu.
+func ValidateLinearNext(targetDef Definition, allDefs []Definition, state ActiveState) error {
+	if state.AppliedMigrationIDs[targetDef.ID] {
+		return ErrMigrationAlreadyActive
+	}
+
+	activeTipVersion := 0
+	if state.ActiveTip != nil {
+		activeTipVersion = state.ActiveTip.MigrationVersion
+	}
+	if targetDef.Version <= activeTipVersion {
+		return ErrLinearOrderViolation
+	}
+
+	sorted := append([]Definition(nil), allDefs...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Version < sorted[j].Version })
+
+	for _, d := range sorted {
+		if d.Version <= activeTipVersion {
+			continue
+		}
+		if d.ID == targetDef.ID || d.Version >= targetDef.Version {
+			return nil
+		}
+		if !state.AppliedMigrationIDs[d.ID] && (state.RolledBackMigrations[d.ID] || !state.FailedMigrations[d.ID]) {
+			return ErrLinearOrderViolation
+		}
+	}
+	return nil
+}
+
 // ValidateLinearForward memeriksa syarat forward linear untuk targetDef terhadap state saat ini:
 // 1. targetDef belum terpasang aktif.
 // 2. targetDef pernah di-rollback atau pernah gagal (up/forward).
-// 3. Urutan linear: migrasi rollback versi lebih kecil setelah Active Tip harus di-forward dulu.
+// 3. Urutan linear mengikuti ValidateLinearNext.
 // 4. Percobaan gagal tidak memblokir migrasi lain (Revisi 2 & 4).
 func ValidateLinearForward(targetDef Definition, allDefs []Definition, state ActiveState) error {
 	if state.AppliedMigrationIDs[targetDef.ID] {
@@ -259,28 +294,7 @@ func ValidateLinearForward(targetDef Definition, allDefs []Definition, state Act
 	if !wasRolledBack && !wasFailed {
 		return ErrForwardNotEligible
 	}
-
-	activeTipVersion := 0
-	if state.ActiveTip != nil {
-		activeTipVersion = state.ActiveTip.MigrationVersion
-	}
-
-	sorted := append([]Definition(nil), allDefs...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Version < sorted[j].Version })
-
-	for _, d := range sorted {
-		if d.Version <= activeTipVersion {
-			continue
-		}
-		if d.ID == targetDef.ID {
-			return nil
-		}
-		// Hanya migrasi rollback yang belum aktif sebelum targetDef yang memaksa urutan forward linear.
-		if !state.AppliedMigrationIDs[d.ID] && state.RolledBackMigrations[d.ID] {
-			return ErrLinearOrderViolation
-		}
-	}
-	return nil
+	return ValidateLinearNext(targetDef, allDefs, state)
 }
 
 const executionColumns = `

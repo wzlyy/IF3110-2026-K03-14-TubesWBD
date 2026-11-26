@@ -1,10 +1,14 @@
 package telemetry
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
 	"strings"
+
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const RedactedValue = "[REDACTED]"
@@ -88,6 +92,16 @@ func SanitizeLogString(s string) string {
 	s = strings.ReplaceAll(s, "\n", "")
 	s = strings.ReplaceAll(s, "\r", "")
 	return s
+}
+
+// RecordSpanError mencatat error tersanitasi pada span OTel tanpa membocorkan kredensial/DSN.
+func RecordSpanError(span trace.Span, err error) {
+	if span == nil || err == nil {
+		return
+	}
+	safe := RedactString(err.Error())
+	span.RecordError(errors.New(safe))
+	span.SetStatus(codes.Error, safe)
 }
 
 // RedactValue menyamarkan nilai sensitif berdasarkan nama key atau pola rahasia.

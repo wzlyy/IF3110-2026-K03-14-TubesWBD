@@ -9,7 +9,6 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -62,8 +61,7 @@ func (d *InstrumentedDB) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Ins
 	tx, err := d.DB.BeginTx(ctx, opts)
 	if err != nil {
 		sqlState := ExtractSQLState(err)
-		span.RecordError(err)
-		span.SetStatus(codes.Error, RedactString(err.Error()))
+		RecordSpanError(span, err)
 		span.End()
 		LogEvent(ctx, slog.LevelError, "sql.tx_start", "error",
 			slog.Float64("duration_ms", durationMS(started)),
@@ -216,8 +214,7 @@ func (t *InstrumentedTx) Commit() error {
 	if err != nil {
 		status = "error"
 		level = slog.LevelError
-		t.span.RecordError(err)
-		t.span.SetStatus(codes.Error, RedactString(err.Error()))
+		RecordSpanError(t.span, err)
 	}
 	t.span.SetAttributes(
 		attribute.String("db.tx.action", "commit"),
@@ -252,8 +249,7 @@ func (t *InstrumentedTx) Rollback() error {
 	if err != nil {
 		status = "error"
 		level = slog.LevelError
-		t.span.RecordError(err)
-		t.span.SetStatus(codes.Error, RedactString(err.Error()))
+		RecordSpanError(t.span, err)
 	}
 	t.span.SetAttributes(
 		attribute.String("db.tx.action", "rollback"),
@@ -345,8 +341,7 @@ func logSQLResult(ctx context.Context, span trace.Span, op, query string, args [
 	if err != nil {
 		status = "error"
 		level = slog.LevelError
-		span.RecordError(errors.New(RedactString(err.Error())))
-		span.SetStatus(codes.Error, RedactString(err.Error()))
+		RecordSpanError(span, err)
 	}
 	span.SetAttributes(attribute.Float64("db.duration_ms", durMS))
 	if rowsAffected >= 0 {

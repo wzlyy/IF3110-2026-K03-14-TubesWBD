@@ -32,11 +32,15 @@ const JOB_STAGE_WINDOWS = [
   { name: 'recovery_10vu', startMs: 120000, endMs: 148000, weight: 0.15 },
 ];
 
-function scheduledJobWindow(idx, total) {
+function scheduledJobWindow(item, total) {
   if (JOB_MODE === 'burst' || total <= 1) {
-    return { offsetMs: 15000, stage: 'baseline_10vu' };
+    const pairDelay = item.scenarioType === 'same_db' ? item.pairIndex * 3000 + item.pairSlot * 15 : 0;
+    return { offsetMs: 15000 + pairDelay, stage: 'baseline_10vu' };
   }
-  const progress = (idx + 0.5) / total;
+  // Kelompokkan job same_db per pasangan (2 job berdekatan) agar memicu kontensi distributed lock
+  // tanpa saling menyalip urutan versi linear, sambil menyebar beban di semua tahap VU.
+  const effectiveIdx = item.scenarioType === 'same_db' ? item.pairIndex * 2 : item.typeIndex;
+  const progress = (effectiveIdx + 0.5) / total;
   let cumulative = 0;
   for (let i = 0; i < JOB_STAGE_WINDOWS.length; i++) {
     const win = JOB_STAGE_WINDOWS[i];
@@ -44,8 +48,9 @@ function scheduledJobWindow(idx, total) {
     cumulative += win.weight;
     if (progress <= cumulative || i === JOB_STAGE_WINDOWS.length - 1) {
       const localProgress = Math.min(1, Math.max(0, (progress - prev) / win.weight));
-      const offsetMs = Math.round(win.startMs + localProgress * (win.endMs - win.startMs));
-      return { offsetMs, stage: win.name };
+      const baseOffset = Math.round(win.startMs + localProgress * (win.endMs - win.startMs));
+      const pairSlotDelay = item.scenarioType === 'same_db' ? item.pairSlot * 15 : 0;
+      return { offsetMs: baseOffset + pairSlotDelay, stage: win.name };
     }
   }
   return { offsetMs: 15000, stage: 'baseline_10vu' };
@@ -57,10 +62,24 @@ const JOB_QUEUE = [];
 const maxLen = Math.max(SAME_DB_REQUEST_IDS.length, DIFF_DB_REQUEST_IDS.length);
 for (let i = 0; i < maxLen; i++) {
   if (i < SAME_DB_REQUEST_IDS.length) {
-    JOB_QUEUE.push({ requestId: SAME_DB_REQUEST_IDS[i], scenarioType: 'same_db' });
+    JOB_QUEUE.push({
+      requestId: SAME_DB_REQUEST_IDS[i],
+      scenarioType: 'same_db',
+      typeIndex: i,
+      typeTotal: SAME_DB_REQUEST_IDS.length,
+      pairIndex: Math.floor(i / 2),
+      pairSlot: i % 2,
+    });
   }
   if (i < DIFF_DB_REQUEST_IDS.length) {
-    JOB_QUEUE.push({ requestId: DIFF_DB_REQUEST_IDS[i], scenarioType: 'diff_db' });
+    JOB_QUEUE.push({
+      requestId: DIFF_DB_REQUEST_IDS[i],
+      scenarioType: 'diff_db',
+      typeIndex: i,
+      typeTotal: DIFF_DB_REQUEST_IDS.length,
+      pairIndex: i,
+      pairSlot: 0,
+    });
   }
 }
 
@@ -207,7 +226,7 @@ export function runMigrationJobs(data) {
     return;
   }
   const item = JOB_QUEUE[idx];
-  const { offsetMs, stage } = scheduledJobWindow(idx, JOB_QUEUE.length);
+  const { offsetMs, stage } = scheduledJobWindow(item, item.typeTotal);
   if (data.startedAtMs) {
     const waitMs = data.startedAtMs + offsetMs - Date.now();
     if (waitMs > 0) {

@@ -13,7 +13,6 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -187,8 +186,7 @@ func (c *RabbitMQClient) publish(ctx context.Context, routingKey string, msg Job
 
 	body, err := json.Marshal(msg)
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+		telemetry.RecordSpanError(span, err)
 		return fmt.Errorf("marshal job message: %w", err)
 	}
 
@@ -214,8 +212,7 @@ func (c *RabbitMQClient) publish(ctx context.Context, routingKey string, msg Job
 
 	ch, err := c.ensureChannel()
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+		telemetry.RecordSpanError(span, err)
 		return err
 	}
 
@@ -230,8 +227,7 @@ func (c *RabbitMQClient) publish(ctx context.Context, routingKey string, msg Job
 		}
 	}
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+		telemetry.RecordSpanError(span, err)
 		return fmt.Errorf("%w: publish failed: %v", ErrQueueUnavailable, err)
 	}
 

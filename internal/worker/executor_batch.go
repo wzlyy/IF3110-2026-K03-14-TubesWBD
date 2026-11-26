@@ -32,7 +32,7 @@ func (a *attempt) batchSpec() (batchSpec, error) {
 	if b.size < 1 || b.size > migration.MaxBatchSize {
 		return b, errors.New("invalid batch size")
 	}
-	plan, err := migration.ParseBatchUpdateSQL(a.snapshot, a.d.BatchTable, a.d.BatchCursorColumn)
+	plan, err := migration.ParseWorkerBatchUpdateSQL(a.snapshot, a.d.BatchTable, a.d.BatchCursorColumn)
 	if err != nil {
 		return b, err
 	}
@@ -53,7 +53,7 @@ func (a *attempt) batch(ctx context.Context) error {
 	if !valid {
 		return errors.New("batch cursor requires a non-null single-column unique key")
 	}
-	if a.j.ActionType == "revert_batch" {
+	if a.j.ActionType == "revert_batch" || a.j.ActionType == "rollback" {
 		return a.revert(ctx, b)
 	}
 	var min, max sql.NullString

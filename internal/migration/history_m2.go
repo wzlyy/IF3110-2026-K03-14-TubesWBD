@@ -72,13 +72,14 @@ type BatchProgressRecord struct {
 
 // ActiveState menyimpan status LIFO linear database yang dihitung langsung dari riwayat eksekusi.
 type ActiveState struct {
-	HiddenRollbackIDs    map[string]struct{} `json:"-"`
-	ActiveExecutions     []ExecutionRecord   `json:"active_executions"`
-	ActiveTip            *ExecutionRecord    `json:"active_tip,omitempty"`
-	AppliedMigrationIDs  map[string]bool     `json:"applied_migration_ids"`
-	RolledBackMigrations map[string]bool     `json:"rolled_back_migrations"`
-	FailedMigrations     map[string]bool     `json:"failed_migrations"`
-	BlockingExecution    *ExecutionRecord    `json:"blocking_execution,omitempty"`
+	HiddenRollbackIDs           map[string]struct{} `json:"-"`
+	ActiveExecutions            []ExecutionRecord   `json:"active_executions"`
+	ActiveTip                   *ExecutionRecord    `json:"active_tip,omitempty"`
+	AppliedMigrationIDs         map[string]bool     `json:"applied_migration_ids"`
+	RolledBackMigrations        map[string]bool     `json:"rolled_back_migrations"`
+	FailedMigrations            map[string]bool     `json:"failed_migrations"`
+	PartiallyRevertedMigrations map[string]bool     `json:"partially_reverted_migrations,omitempty"`
+	BlockingExecution           *ExecutionRecord    `json:"blocking_execution,omitempty"`
 }
 
 // HistoryResponse adalah respons untuk GET /api/v1/databases/{database_id}/history.
@@ -178,11 +179,12 @@ func FilterHistory(records []ExecutionRecord, hideRollback bool) ([]ExecutionRec
 func ComputeActiveState(records []ExecutionRecord) ActiveState {
 	hidden, rolledBack := rollbackEffects(records)
 	state := ActiveState{
-		HiddenRollbackIDs:    hidden,
-		ActiveExecutions:     make([]ExecutionRecord, 0),
-		AppliedMigrationIDs:  make(map[string]bool),
-		RolledBackMigrations: rolledBack,
-		FailedMigrations:     make(map[string]bool),
+		HiddenRollbackIDs:           hidden,
+		ActiveExecutions:            make([]ExecutionRecord, 0),
+		AppliedMigrationIDs:         make(map[string]bool),
+		RolledBackMigrations:        rolledBack,
+		FailedMigrations:            make(map[string]bool),
+		PartiallyRevertedMigrations: make(map[string]bool),
 	}
 
 	// Lacak eksekusi partial yang sudah diselesaikan oleh resume_batch atau revert_batch sukses berikutnya.
@@ -220,6 +222,9 @@ func ComputeActiveState(records []ExecutionRecord) ActiveState {
 			if !resolvedPartialIDs[r.ExecutionID] {
 				recCopy := r
 				state.BlockingExecution = &recCopy
+				if r.Status == ExecStatusPartiallyReverted {
+					state.PartiallyRevertedMigrations[r.MigrationID] = true
+				}
 			}
 		case ExecStatusFailed:
 			if r.ActionType == ActionUp || r.ActionType == ActionForward {
@@ -230,6 +235,11 @@ func ComputeActiveState(records []ExecutionRecord) ActiveState {
 				continue
 			}
 			if r.ActionType == ActionUp || r.ActionType == ActionForward || r.ActionType == ActionResumeBatch {
+				delete(state.FailedMigrations, r.MigrationID)
+				if r.ActionType == ActionUp && state.BlockingExecution != nil && state.BlockingExecution.Status == ExecStatusPartiallyReverted {
+					// Migration perbaikan baru yang sukses menuntaskan blokir partially_reverted sebelumnya.
+					state.BlockingExecution = nil
+				}
 				if _, cancelled := hidden[r.ExecutionID]; !cancelled {
 					state.ActiveExecutions = append(state.ActiveExecutions, r)
 					state.AppliedMigrationIDs[r.MigrationID] = true
@@ -273,7 +283,7 @@ func ValidateLinearNext(targetDef Definition, allDefs []Definition, state Active
 		if d.ID == targetDef.ID || d.Version >= targetDef.Version {
 			return nil
 		}
-		if !state.AppliedMigrationIDs[d.ID] && (state.RolledBackMigrations[d.ID] || !state.FailedMigrations[d.ID]) {
+		if !state.AppliedMigrationIDs[d.ID] && !state.FailedMigrations[d.ID] && !state.PartiallyRevertedMigrations[d.ID] {
 			return ErrLinearOrderViolation
 		}
 	}

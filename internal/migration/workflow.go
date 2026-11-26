@@ -14,7 +14,6 @@ import (
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/queue"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -186,12 +185,22 @@ func (s *WorkflowService) ValidateRequestPreconditions(
 		if blocking.Status == ExecStatusUncertain {
 			return ErrDatabaseBlocked
 		}
-		// Hanya resume_batch atau revert_batch untuk eksekusi pemblokir yang boleh lanjut.
-		if in.ActionType != ActionResumeBatch && in.ActionType != ActionRevertBatch {
-			return ErrDatabaseBlocked
-		}
-		if in.TargetExecutionID == "" || in.TargetExecutionID != blocking.ExecutionID {
-			return fmt.Errorf("%w: target_execution_id harus merujuk ke eksekusi partial %s", ErrBatchActionInvalid, blocking.ExecutionID)
+		if blocking.Status == ExecStatusPartiallyReverted {
+			// Pembatalan tidak aman: izinkan revert_batch pada eksekusi pemblokir ATAU migration perbaikan baru (up).
+			if in.ActionType != ActionRevertBatch && in.ActionType != ActionUp {
+				return ErrDatabaseBlocked
+			}
+			if in.ActionType == ActionRevertBatch && (in.TargetExecutionID == "" || in.TargetExecutionID != blocking.ExecutionID) {
+				return fmt.Errorf("%w: target_execution_id harus merujuk ke eksekusi partial %s", ErrBatchActionInvalid, blocking.ExecutionID)
+			}
+		} else {
+			// Hanya resume_batch atau revert_batch untuk eksekusi partial yang boleh lanjut.
+			if in.ActionType != ActionResumeBatch && in.ActionType != ActionRevertBatch {
+				return ErrDatabaseBlocked
+			}
+			if in.TargetExecutionID == "" || in.TargetExecutionID != blocking.ExecutionID {
+				return fmt.Errorf("%w: target_execution_id harus merujuk ke eksekusi partial %s", ErrBatchActionInvalid, blocking.ExecutionID)
+			}
 		}
 	}
 
@@ -207,7 +216,36 @@ func (s *WorkflowService) ValidateRequestPreconditions(
 		if err != nil {
 			return err
 		}
-		return ValidateLinearNext(*def, allDefs, state)
+		// Saat membuat request baru, migrasi pendahulu yang sudah memiliki request approved/queued/running
+		// diizinkan sebagai antrean berurutan; worker tetap menegakkan ValidateLinearNext saat eksekusi.
+		plannedState := state
+		rows, qerr := s.DB.QueryContext(ctx, `
+			SELECT DISTINCT migration_id
+			FROM migration_requests
+			WHERE database_id = $1 AND action_type IN ('up', 'forward') AND status IN ('approved', 'pending_queue', 'running')
+		`, databaseID)
+		if qerr != nil {
+			return qerr
+		}
+		defer rows.Close()
+		appliedCopy := make(map[string]bool, len(state.AppliedMigrationIDs))
+		for k, v := range state.AppliedMigrationIDs {
+			appliedCopy[k] = v
+		}
+		for rows.Next() {
+			var mid string
+			if serr := rows.Scan(&mid); serr != nil {
+				return serr
+			}
+			if mid != def.ID {
+				appliedCopy[mid] = true
+			}
+		}
+		if rerr := rows.Err(); rerr != nil {
+			return rerr
+		}
+		plannedState.AppliedMigrationIDs = appliedCopy
+		return ValidateLinearNext(*def, allDefs, plannedState)
 
 	case ActionRollback:
 		if def.IsIrreversible {
@@ -325,7 +363,16 @@ func (s *WorkflowService) EnqueueRequest(ctx context.Context, requestID, actorUs
 			}
 			if li.HoldState == lock.StateHeldPartial &&
 				((actionType != ActionResumeBatch && actionType != ActionRevertBatch) || targetExecID.String != li.ExecutionID) {
-				return nil, ErrDatabaseBlocked
+				allowRepair := false
+				if actionType == ActionUp && li.ExecutionID != "" {
+					var blockerStatus string
+					if qerr := tx.QueryRowContext(ctx, `SELECT status FROM migration_executions WHERE execution_id = $1`, li.ExecutionID).Scan(&blockerStatus); qerr == nil && blockerStatus == ExecStatusPartiallyReverted {
+						allowRepair = true
+					}
+				}
+				if !allowRepair {
+					return nil, ErrDatabaseBlocked
+				}
 			}
 		} else if lerr != nil && !errors.Is(lerr, lock.ErrLockNotFound) {
 			return nil, lerr
@@ -393,8 +440,7 @@ func (s *WorkflowService) EnqueueRequest(ctx context.Context, requestID, actorUs
 		`, requestID, jobID)
 		compCancel()
 
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+		telemetry.RecordSpanError(span, err)
 		return nil, fmt.Errorf("publish job to queue: %w", err)
 	}
 

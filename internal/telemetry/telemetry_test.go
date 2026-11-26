@@ -448,3 +448,25 @@ func TestLoggerErrorRedactionSQLParamRedactionPGXTracerAndInflightCache(t *testi
 		t.Fatalf("expected cached inflight query count = 1 across rapid scrapes, got %d", calls)
 	}
 }
+
+func TestRecordSpanErrorRedactsCredentials(t *testing.T) {
+	var traceBuf bytes.Buffer
+	tp, shutdown, err := InitTracer(context.Background(), "test-service", "", &traceBuf)
+	if err != nil {
+		t.Fatalf("InitTracer failed: %v", err)
+	}
+	defer func() { _ = shutdown(context.Background()) }()
+
+	_, span := tp.Tracer("test").Start(context.Background(), "worker.consume")
+	RecordSpanError(span, errors.New("dial postgres://postgres:TopSecret123@db:5432/app failed"))
+	span.End()
+	_ = tp.ForceFlush(context.Background())
+
+	out := traceBuf.String()
+	if strings.Contains(out, "TopSecret123") {
+		t.Fatalf("span output leaked raw secret: %s", out)
+	}
+	if !strings.Contains(out, "REDACTED") || !strings.Contains(out, `"Code":"Error"`) {
+		t.Fatalf("expected redacted error and Error status on span: %s", out)
+	}
+}

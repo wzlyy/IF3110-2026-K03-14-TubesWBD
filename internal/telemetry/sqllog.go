@@ -106,7 +106,7 @@ func (d *InstrumentedDB) QueryRowContext(ctx context.Context, query string, args
 	LogEvent(ctx, slog.LevelInfo, "sql.start", "started",
 		slog.String("operation", "query_row"),
 		slog.String("query", RedactString(query)),
-		slog.Any("params", RedactParams(args)),
+		slog.Any("params", RedactSQLParams(query, args)),
 	)
 	row := d.DB.QueryRowContext(ctx, query, args...)
 	err := row.Err()
@@ -164,7 +164,7 @@ func (t *InstrumentedTx) QueryRowContext(ctx context.Context, query string, args
 	LogEvent(ctx, slog.LevelInfo, "sql.start", "started",
 		slog.String("operation", "tx_query_row"),
 		slog.String("query", RedactString(query)),
-		slog.Any("params", RedactParams(args)),
+		slog.Any("params", RedactSQLParams(query, args)),
 	)
 	row := t.Tx.QueryRowContext(ctx, query, args...)
 	logSQLResult(ctx, span, "tx_query_row", query, args, started, -1, row.Err())
@@ -307,7 +307,7 @@ func execLogged(ctx context.Context, dbName, op, query string, args []any, fn fu
 	LogEvent(ctx, slog.LevelInfo, "sql.start", "started",
 		slog.String("operation", op),
 		slog.String("query", RedactString(query)),
-		slog.Any("params", RedactParams(args)),
+		slog.Any("params", RedactSQLParams(query, args)),
 	)
 
 	res, err := fn(ctx)
@@ -329,7 +329,7 @@ func queryLogged(ctx context.Context, dbName, op, query string, args []any, fn f
 	LogEvent(ctx, slog.LevelInfo, "sql.start", "started",
 		slog.String("operation", op),
 		slog.String("query", RedactString(query)),
-		slog.Any("params", RedactParams(args)),
+		slog.Any("params", RedactSQLParams(query, args)),
 	)
 
 	rows, err := fn(ctx)
@@ -345,7 +345,7 @@ func logSQLResult(ctx context.Context, span trace.Span, op, query string, args [
 	if err != nil {
 		status = "error"
 		level = slog.LevelError
-		span.RecordError(err)
+		span.RecordError(errors.New(RedactString(err.Error())))
 		span.SetStatus(codes.Error, RedactString(err.Error()))
 	}
 	span.SetAttributes(attribute.Float64("db.duration_ms", durMS))
@@ -356,7 +356,7 @@ func logSQLResult(ctx context.Context, span trace.Span, op, query string, args [
 	attrs := []slog.Attr{
 		slog.String("operation", op),
 		slog.String("query", RedactString(query)),
-		slog.Any("params", RedactParams(args)),
+		slog.Any("params", RedactSQLParams(query, args)),
 		slog.Float64("duration_ms", durMS),
 	}
 	if rowsAffected >= 0 {

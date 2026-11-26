@@ -3,7 +3,7 @@ global:
 scrape_configs:
   - job_name: backend-api
     static_configs:
-      - targets: ["backend-api:8080"]
+      - targets: ["backend-api:9091"]
   - job_name: worker
     static_configs:
       - targets: ["worker:9091"]

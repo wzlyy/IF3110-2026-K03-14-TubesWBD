@@ -6,13 +6,16 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
@@ -365,4 +368,83 @@ func openStubSQLDB(t *testing.T) *sql.DB {
 		t.Fatalf("open stub sql db: %v", err)
 	}
 	return db
+}
+
+func TestLoggerErrorRedactionSQLParamRedactionPGXTracerAndInflightCache(t *testing.T) {
+	var buf bytes.Buffer
+	oldLogger := Logger()
+	InitLogger(&buf)
+	t.Cleanup(func() {
+		loggerMu.Lock()
+		logger = oldLogger
+		loggerMu.Unlock()
+		slog.SetDefault(oldLogger)
+	})
+
+	// 1. slog.Any("error", err) harus disanitasi & disamarkan menjadi string tunggal.
+	LogAudit(context.Background(), "test.err", "error",
+		slog.Any("error", errors.New("dial postgres://user:Secret99@db/app\ninjected=1")),
+	)
+	var errEntry map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &errEntry); err != nil {
+		t.Fatalf("unmarshal log json: %v (%s)", err, buf.String())
+	}
+	errVal, ok := errEntry["error"].(string)
+	if !ok || strings.Contains(errVal, "Secret99") || strings.Contains(errVal, "\n") || !strings.Contains(errVal, "REDACTED") {
+		t.Fatalf("expected redacted sanitized error string, got %#v", errEntry["error"])
+	}
+
+	// 2. RedactSQLParams menyamarkan seluruh parameter pada tabel/kolom sensitif.
+	sessParams := RedactSQLParams("SELECT user_id FROM sessions WHERE id = $1 AND csrf_token = $2", []any{"tok-123", "csrf-456"})
+	if len(sessParams) != 2 || sessParams[0] != RedactedValue || sessParams[1] != RedactedValue {
+		t.Fatalf("expected redacted session params, got %#v", sessParams)
+	}
+	ordParams := RedactSQLParams("UPDATE orders SET status = $1 WHERE id = $2", []any{"archived", 7})
+	if len(ordParams) != 2 || ordParams[0] != "archived" || ordParams[1] != 7 {
+		t.Fatalf("unexpected non-sensitive params: %#v", ordParams)
+	}
+
+	// 3. NewPGXTracer memaksa label database="platform", memfilter argumen internal pgx, serta melacak tx & query.
+	buf.Reset()
+	tr := NewPGXTracer("platform")
+	ctx := WithDatabase(context.Background(), "target-1")
+	txCtx := tr.TraceQueryStart(ctx, nil, pgx.TraceQueryStartData{SQL: "BEGIN"})
+	tr.TraceQueryEnd(txCtx, nil, pgx.TraceQueryEndData{})
+	qCtx := tr.TraceQueryStart(ctx, nil, pgx.TraceQueryStartData{
+		SQL:  "SELECT user_id FROM sessions WHERE id = $1",
+		Args: []any{pgx.QueryExecModeSimpleProtocol, "secret-session-tok"},
+	})
+	tr.TraceQueryEnd(qCtx, nil, pgx.TraceQueryEndData{})
+	commitCtx := tr.TraceQueryStart(ctx, nil, pgx.TraceQueryStartData{SQL: "COMMIT"})
+	tr.TraceQueryEnd(commitCtx, nil, pgx.TraceQueryEndData{})
+
+	logText := buf.String()
+	if strings.Contains(logText, "secret-session-tok") || strings.Contains(logText, "simple_protocol") {
+		t.Fatalf("pgx tracer leaked secret or internal pgx arg: %s", logText)
+	}
+	for _, want := range []string{`"database":"platform"`, `"sql.tx_start"`, `"sql.start"`, `"sql.result"`, `"sql.tx_end"`, `"committed"`} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("expected %s in pgx tracer logs:\n%s", want, logText)
+		}
+	}
+
+	// 4. Metrics.Handler melakukan cache count inflight DB selama inflightCacheTTL.
+	m := NewMetrics()
+	calls := 0
+	m.poolMu.Lock()
+	m.inflightSource = func(context.Context) (float64, float64, bool) {
+		calls++
+		return 3, 1, true
+	}
+	m.poolMu.Unlock()
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `migration_jobs_inflight{status="waiting"} 3`) {
+			t.Fatalf("scrape %d unexpected response %d:\n%s", i, rec.Code, rec.Body.String())
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("expected cached inflight query count = 1 across rapid scrapes, got %d", calls)
+	}
 }

@@ -8,19 +8,22 @@ import (
 	"sort"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/config"
+	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/telemetry"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/migrations"
 )
 
 // NewPlatformDB initializes and verifies the PostgreSQL connection pool for the platform.
 func NewPlatformDB(cfg *config.Config) (*sql.DB, error) {
-	dsn := cfg.PlatformDB.DSN()
-
-	db, err := sql.Open("pgx", dsn)
+	connCfg, err := pgx.ParseConfig(cfg.PlatformDB.DSN())
 	if err != nil {
-		return nil, fmt.Errorf("failed to open database connection: %w", err)
+		return nil, fmt.Errorf("failed to parse database connection config: %w", err)
 	}
+	connCfg.Tracer = telemetry.NewPGXTracer("platform")
+
+	db := stdlib.OpenDB(*connCfg)
 
 	// Configure pool parameters
 	db.SetMaxOpenConns(25)

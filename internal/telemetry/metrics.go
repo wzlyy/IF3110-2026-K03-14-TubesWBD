@@ -30,10 +30,17 @@ type Metrics struct {
 	BatchesProcessed     *prometheus.CounterVec
 	RowsProcessed        prometheus.Counter
 
-	poolMu          sync.RWMutex
-	poolSources     []PoolStatsSource
-	inflightSource  func(ctx context.Context) (waiting, running float64, ok bool)
+	poolMu           sync.RWMutex
+	poolSources      []PoolStatsSource
+	inflightSource   func(ctx context.Context) (waiting, running float64, ok bool)
+	inflightMu       sync.Mutex
+	inflightCachedAt time.Time
+	inflightWaiting  float64
+	inflightRunning  float64
+	inflightHasCache bool
 }
+
+const inflightCacheTTL = 2 * time.Second
 
 var (
 	metricsOnce   sync.Once
@@ -135,6 +142,9 @@ func (m *Metrics) RegisterDBPool(role string, statsFn func() sql.DBStats) {
 	m.poolMu.Lock()
 	m.poolSources = append(m.poolSources, PoolStatsSource{Role: role, Stats: statsFn})
 	m.poolMu.Unlock()
+	m.inflightMu.Lock()
+	m.inflightHasCache = false
+	m.inflightMu.Unlock()
 }
 
 // RegisterJobInflightDB mengikat gauge migration_jobs_inflight ke hitungan langsung Platform DB.
@@ -172,6 +182,9 @@ func (m *Metrics) RegisterJobInflightDB(db *sql.DB) {
 		return waiting, running, rows.Err() == nil
 	}
 	m.poolMu.Unlock()
+	m.inflightMu.Lock()
+	m.inflightHasCache = false
+	m.inflightMu.Unlock()
 }
 
 // RecordJobEnqueued menambah counter pending_queue (serta gauge lokal jika tanpa DB).
@@ -237,17 +250,33 @@ func (m *Metrics) RecordBatchProcessed(status string, rowsAffected int64) {
 func (m *Metrics) Handler() http.Handler {
 	promHandler := promhttp.HandlerFor(m.Registry, promhttp.HandlerOpts{})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		m.poolMu.RLock()
-		src := m.inflightSource
-		m.poolMu.RUnlock()
-		if src != nil {
-			if waiting, running, ok := src(r.Context()); ok {
-				m.JobsInflight.WithLabelValues("waiting").Set(waiting)
-				m.JobsInflight.WithLabelValues("running").Set(running)
-			}
-		}
+		m.refreshInflightGauges(r.Context())
 		promHandler.ServeHTTP(w, r)
 	})
+}
+
+func (m *Metrics) refreshInflightGauges(ctx context.Context) {
+	m.poolMu.RLock()
+	src := m.inflightSource
+	m.poolMu.RUnlock()
+	if src == nil {
+		return
+	}
+	m.inflightMu.Lock()
+	defer m.inflightMu.Unlock()
+	if m.inflightHasCache && time.Since(m.inflightCachedAt) < inflightCacheTTL {
+		m.JobsInflight.WithLabelValues("waiting").Set(m.inflightWaiting)
+		m.JobsInflight.WithLabelValues("running").Set(m.inflightRunning)
+		return
+	}
+	if waiting, running, ok := src(ctx); ok {
+		m.inflightWaiting = waiting
+		m.inflightRunning = running
+		m.inflightCachedAt = time.Now()
+		m.inflightHasCache = true
+		m.JobsInflight.WithLabelValues("waiting").Set(waiting)
+		m.JobsInflight.WithLabelValues("running").Set(running)
+	}
 }
 
 // StartMetricsServer menjalankan server HTTP /metrics (untuk proses worker).

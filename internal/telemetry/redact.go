@@ -135,3 +135,20 @@ func RedactParams(params []any) []any {
 	}
 	return sanitized
 }
+
+var sensitiveSQLParamRe = regexp.MustCompile(`(?i)\b(sessions|session_grace_tokens|password_hash|password_encrypted|csrf_token)\b`)
+
+// RedactSQLParams menyamarkan seluruh argumen bila query menyentuh kredensial, sesi, atau token.
+func RedactSQLParams(query string, params []any) []any {
+	if len(params) == 0 {
+		return nil
+	}
+	if sensitiveSQLParamRe.MatchString(query) {
+		redacted := make([]any, len(params))
+		for i := range redacted {
+			redacted[i] = RedactedValue
+		}
+		return redacted
+	}
+	return RedactParams(params)
+}

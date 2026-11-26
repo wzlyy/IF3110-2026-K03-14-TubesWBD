@@ -583,3 +583,80 @@ func TestWorkerResumeBatchTransientRetryPreservesPartialLock(t *testing.T) {
 		t.Fatalf("expected lock restored to held_partial on root %s, got %+v err=%v", upJob.ExecutionID, li, err)
 	}
 }
+
+func TestWorkerRevalidationEnforcesStrictLinearOrder(t *testing.T) {
+	f := newFixture(t, "TARGET_PG")
+	ctx := context.Background()
+
+	v1 := f.newJob("normal", "UPDATE "+f.table+" SET v=v+1")
+	v2 := f.newJob("normal", "UPDATE "+f.table+" SET v=v+10")
+
+	// v2 arrives at worker before v1 has executed; revalidation must reject it.
+	f.run(v2, "failed")
+	f.sum(0)
+	if _, err := f.s.Locks.GetLock(ctx, f.dbID); !errors.Is(err, lock.ErrLockNotFound) {
+		t.Fatalf("lock remained after strict linear order failure: %v", err)
+	}
+	var errMsg sql.NullString
+	if err := f.s.DB.QueryRow("SELECT error_message FROM migration_executions WHERE execution_id=$1", v2.ExecutionID).Scan(&errMsg); err != nil {
+		t.Fatal(err)
+	}
+	if errMsg.String == "" {
+		t.Fatalf("expected error_message recorded on failed out-of-order attempt")
+	}
+
+	// Execute v1 first, then retry v2 in order.
+	f.run(v1, "success")
+	f.sum(8)
+	v2InOrder := f.request(v2.MigrationID, "normal", "up", "")
+	f.run(v2InOrder, "success")
+	f.sum(88)
+}
+
+func TestWorkerRepairMigrationClearsPartialAfterIrreversibleOrFailedRevert(t *testing.T) {
+	t.Run("irreversible_partial", func(t *testing.T) {
+		f := newFixture(t, "TARGET_PG")
+		ctx := context.Background()
+		f.exec(f.target, "ALTER TABLE "+f.table+" ADD CONSTRAINT stop_at_five CHECK(id<>5 OR v=0)")
+
+		f.version++
+		irrevID := uuid.NewString()
+		f.exec(f.s.DB, `INSERT INTO migration_definitions(id,database_id,version,name,sql_up,sql_down,is_irreversible,irreversible_reason,execution_mode,batch_table,batch_cursor_column,batch_size,created_by)
+ VALUES($1,$2,$3,'irrev_batch',$4,NULL,TRUE,'cannot revert','batch',$5,'id',2,$6)`, irrevID, f.dbID, f.version, "UPDATE "+f.table+" SET v=v+1", f.table, f.user)
+
+		j1 := f.request(irrevID, "batch", "up", "")
+		f.run(j1, "partial")
+		f.sum(4)
+
+		f.exec(f.target, "ALTER TABLE "+f.table+" DROP CONSTRAINT stop_at_five")
+		j2 := f.newJob("normal", "UPDATE "+f.table+" SET v=10 WHERE id>4")
+		f.run(j2, "success")
+		f.sum(44)
+		if _, err := f.s.Locks.GetLock(ctx, f.dbID); !errors.Is(err, lock.ErrLockNotFound) {
+			t.Fatalf("expected lock released after repair migration, got %v", err)
+		}
+	})
+
+	t.Run("unsafe_revert_partial", func(t *testing.T) {
+		f := newFixture(t, "TARGET_PG")
+		ctx := context.Background()
+		f.exec(f.target, "ALTER TABLE "+f.table+" ADD CONSTRAINT stop_at_five CHECK(id<>5 OR v=0)")
+
+		j1 := f.newJob("batch", "UPDATE "+f.table+" SET v=v+1")
+		f.run(j1, "partial")
+		f.sum(4)
+
+		// Mutate row 4 in committed batch so revert_batch fails cleanly and restores held_partial on j1.
+		f.exec(f.target, "UPDATE "+f.table+" SET v=99 WHERE id=4")
+		rev := f.request(j1.MigrationID, "batch", "revert_batch", j1.ExecutionID)
+		f.run(rev, "failed")
+
+		f.exec(f.target, "ALTER TABLE "+f.table+" DROP CONSTRAINT stop_at_five")
+		j2 := f.newJob("normal", "UPDATE "+f.table+" SET v=1 WHERE id<>4")
+		f.run(j2, "success")
+		f.sum(106)
+		if _, err := f.s.Locks.GetLock(ctx, f.dbID); !errors.Is(err, lock.ErrLockNotFound) {
+			t.Fatalf("expected lock released after repair migration, got %v", err)
+		}
+	})
+}

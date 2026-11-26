@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -21,6 +22,32 @@ type AdminAPIHandler struct {
 	DB      *sql.DB
 	Store   *database.ConnectionStore
 	Manager *database.TargetManager
+}
+
+var (
+	errLeaderNotFound     = errors.New("leader_not_found")
+	errLeaderInactive     = errors.New("leader_inactive")
+	errCannotRemoveLeader = errors.New("cannot_remove_leader")
+	errSelfLockout        = errors.New("self_lockout")
+	errActiveGroupLeader  = errors.New("active_group_leader")
+	errLastPlatformAdmin  = errors.New("last_platform_admin")
+)
+
+const adminInvariantLockID int64 = 842901
+
+func ensureOtherActiveAdminExists(ctx context.Context, tx *sql.Tx, excludeUserID string) error {
+	var otherAdmins int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM users
+		WHERE is_platform_admin = TRUE AND is_active = TRUE AND id <> $1
+	`, excludeUserID).Scan(&otherAdmins); err != nil {
+		return err
+	}
+	if otherAdmins == 0 {
+		return errLastPlatformAdmin
+	}
+	return nil
 }
 
 type adminUserDTO struct {
@@ -60,7 +87,7 @@ type adminGrantDTO struct {
 func (h *AdminAPIHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.DB.QueryContext(r.Context(), `
 		SELECT u.id, u.username, u.is_platform_admin, u.is_active, u.created_at,
-		       COALESCE(string_agg(g.name, ', ' ORDER BY g.name), '')
+		       COALESCE(json_agg(g.name ORDER BY g.name) FILTER (WHERE g.name IS NOT NULL), '[]'::json)::text
 		FROM users u
 		LEFT JOIN user_groups ug ON u.id = ug.user_id
 		LEFT JOIN groups g ON ug.group_id = g.id
@@ -78,13 +105,21 @@ func (h *AdminAPIHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
 		var u adminUserDTO
 		var rawGroups string
 		if err := rows.Scan(&u.ID, &u.Username, &u.IsPlatformAdmin, &u.IsActive, &u.CreatedAt, &rawGroups); err != nil {
-			continue
+			WriteError(w, http.StatusInternalServerError, "Gagal memuat daftar pengguna")
+			return
 		}
 		u.Groups = []string{}
 		if rawGroups != "" {
-			u.Groups = strings.Split(rawGroups, ", ")
+			if err := json.Unmarshal([]byte(rawGroups), &u.Groups); err != nil {
+				WriteError(w, http.StatusInternalServerError, "Gagal memuat daftar pengguna")
+				return
+			}
 		}
 		users = append(users, u)
+	}
+	if err := rows.Err(); err != nil {
+		WriteError(w, http.StatusInternalServerError, "Gagal memuat daftar pengguna")
+		return
 	}
 	WriteJSON(w, http.StatusOK, map[string]any{"users": users})
 }
@@ -137,11 +172,31 @@ func (h *AdminAPIHandler) ToggleUserActive(w http.ResponseWriter, r *http.Reques
 		WriteError(w, http.StatusBadRequest, "ID pengguna tidak valid")
 		return
 	}
+	actor := auth.GetUserFromContext(r.Context())
 	var newActive bool
 	err := runTx(r.Context(), h.DB, func(tx *sql.Tx) error {
-		var cur bool
-		if err := tx.QueryRowContext(r.Context(), `SELECT is_active FROM users WHERE id = $1 FOR UPDATE`, userID).Scan(&cur); err != nil {
+		if _, err := tx.ExecContext(r.Context(), `SELECT pg_advisory_xact_lock($1)`, adminInvariantLockID); err != nil {
 			return err
+		}
+		var cur, isAdmin bool
+		if err := tx.QueryRowContext(r.Context(), `SELECT is_active, is_platform_admin FROM users WHERE id = $1 FOR UPDATE`, userID).Scan(&cur, &isAdmin); err != nil {
+			return err
+		}
+		if cur {
+			if actor != nil && actor.ID == userID {
+				return errSelfLockout
+			}
+			if isAdmin {
+				if err := ensureOtherActiveAdminExists(r.Context(), tx, userID); err != nil {
+					return err
+				}
+			}
+			var tmp int
+			if err := tx.QueryRowContext(r.Context(), `SELECT 1 FROM groups WHERE leader_user_id = $1 LIMIT 1 FOR UPDATE`, userID).Scan(&tmp); err == nil {
+				return errActiveGroupLeader
+			} else if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
 		}
 		newActive = !cur
 		if _, err := tx.ExecContext(r.Context(), `UPDATE users SET is_active = $1 WHERE id = $2`, newActive, userID); err != nil {
@@ -152,12 +207,19 @@ func (h *AdminAPIHandler) ToggleUserActive(w http.ResponseWriter, r *http.Reques
 		}
 		return nil
 	})
-	if errors.Is(err, sql.ErrNoRows) {
-		WriteError(w, http.StatusNotFound, "Pengguna tidak ditemukan")
-		return
-	}
 	if err != nil {
-		WriteError(w, http.StatusInternalServerError, "Gagal mengubah status pengguna")
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			WriteError(w, http.StatusNotFound, "Pengguna tidak ditemukan")
+		case errors.Is(err, errSelfLockout):
+			WriteError(w, http.StatusConflict, "Tidak dapat menonaktifkan akun sendiri")
+		case errors.Is(err, errLastPlatformAdmin):
+			WriteError(w, http.StatusConflict, "Minimal satu platform admin aktif harus tetap dipertahankan")
+		case errors.Is(err, errActiveGroupLeader):
+			WriteError(w, http.StatusConflict, "Ganti leader group terlebih dahulu sebelum menonaktifkan pengguna ini")
+		default:
+			WriteError(w, http.StatusInternalServerError, "Gagal mengubah status pengguna")
+		}
 		return
 	}
 	telemetry.LogAudit(r.Context(), "admin.user.toggle_active", "ok", slog.String("target_user_id", userID), slog.Bool("is_active", newActive))
@@ -170,11 +232,25 @@ func (h *AdminAPIHandler) ToggleUserAdmin(w http.ResponseWriter, r *http.Request
 		WriteError(w, http.StatusBadRequest, "ID pengguna tidak valid")
 		return
 	}
+	actor := auth.GetUserFromContext(r.Context())
 	var newAdmin bool
 	err := runTx(r.Context(), h.DB, func(tx *sql.Tx) error {
-		var cur bool
-		if err := tx.QueryRowContext(r.Context(), `SELECT is_platform_admin FROM users WHERE id = $1 FOR UPDATE`, userID).Scan(&cur); err != nil {
+		if _, err := tx.ExecContext(r.Context(), `SELECT pg_advisory_xact_lock($1)`, adminInvariantLockID); err != nil {
 			return err
+		}
+		var cur, isActive bool
+		if err := tx.QueryRowContext(r.Context(), `SELECT is_platform_admin, is_active FROM users WHERE id = $1 FOR UPDATE`, userID).Scan(&cur, &isActive); err != nil {
+			return err
+		}
+		if cur {
+			if actor != nil && actor.ID == userID {
+				return errSelfLockout
+			}
+			if isActive {
+				if err := ensureOtherActiveAdminExists(r.Context(), tx, userID); err != nil {
+					return err
+				}
+			}
 		}
 		newAdmin = !cur
 		if _, err := tx.ExecContext(r.Context(), `UPDATE users SET is_platform_admin = $1 WHERE id = $2`, newAdmin, userID); err != nil {
@@ -185,12 +261,17 @@ func (h *AdminAPIHandler) ToggleUserAdmin(w http.ResponseWriter, r *http.Request
 		}
 		return auth.RotateUserSessions(r.Context(), tx, userID)
 	})
-	if errors.Is(err, sql.ErrNoRows) {
-		WriteError(w, http.StatusNotFound, "Pengguna tidak ditemukan")
-		return
-	}
 	if err != nil {
-		WriteError(w, http.StatusInternalServerError, "Gagal mengubah peran admin")
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			WriteError(w, http.StatusNotFound, "Pengguna tidak ditemukan")
+		case errors.Is(err, errSelfLockout):
+			WriteError(w, http.StatusConflict, "Tidak dapat mencabut hak admin akun sendiri")
+		case errors.Is(err, errLastPlatformAdmin):
+			WriteError(w, http.StatusConflict, "Minimal satu platform admin aktif harus tetap dipertahankan")
+		default:
+			WriteError(w, http.StatusInternalServerError, "Gagal mengubah peran admin")
+		}
 		return
 	}
 	telemetry.LogAudit(r.Context(), "admin.user.toggle_admin", "ok", slog.String("target_user_id", userID), slog.Bool("is_platform_admin", newAdmin))
@@ -307,14 +388,14 @@ func (h *AdminAPIHandler) CreateGroup(w http.ResponseWriter, r *http.Request) {
 	id := uuid.NewString()
 	err := runTx(r.Context(), h.DB, func(tx *sql.Tx) error {
 		var active bool
-		if err := tx.QueryRowContext(r.Context(), `SELECT is_active FROM users WHERE id = $1`, req.LeaderUserID).Scan(&active); err != nil {
+		if err := tx.QueryRowContext(r.Context(), `SELECT is_active FROM users WHERE id = $1 FOR UPDATE`, req.LeaderUserID).Scan(&active); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				return errors.New("leader_not_found")
+				return errLeaderNotFound
 			}
 			return err
 		}
 		if !active {
-			return errors.New("leader_inactive")
+			return errLeaderInactive
 		}
 		if _, err := tx.ExecContext(r.Context(), `
 			INSERT INTO groups (id, name, leader_user_id, created_at)
@@ -332,9 +413,9 @@ func (h *AdminAPIHandler) CreateGroup(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		switch {
-		case err.Error() == "leader_not_found":
+		case errors.Is(err, errLeaderNotFound):
 			WriteError(w, http.StatusUnprocessableEntity, "Leader yang dipilih tidak ditemukan")
-		case err.Error() == "leader_inactive":
+		case errors.Is(err, errLeaderInactive):
 			WriteError(w, http.StatusUnprocessableEntity, "Leader group harus merupakan pengguna yang aktif")
 		case isUniqueViolation(err):
 			WriteError(w, http.StatusConflict, "Nama group sudah digunakan")
@@ -370,19 +451,19 @@ func (h *AdminAPIHandler) UpdateGroup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err := runTx(r.Context(), h.DB, func(tx *sql.Tx) error {
-		var existing string
-		if err := tx.QueryRowContext(r.Context(), `SELECT id FROM groups WHERE id = $1 FOR UPDATE`, groupID).Scan(&existing); err != nil {
-			return err
-		}
 		var active bool
-		if err := tx.QueryRowContext(r.Context(), `SELECT is_active FROM users WHERE id = $1`, req.LeaderUserID).Scan(&active); err != nil {
+		if err := tx.QueryRowContext(r.Context(), `SELECT is_active FROM users WHERE id = $1 FOR UPDATE`, req.LeaderUserID).Scan(&active); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				return errors.New("leader_not_found")
+				return errLeaderNotFound
 			}
 			return err
 		}
 		if !active {
-			return errors.New("leader_inactive")
+			return errLeaderInactive
+		}
+		var existing string
+		if err := tx.QueryRowContext(r.Context(), `SELECT id FROM groups WHERE id = $1 FOR UPDATE`, groupID).Scan(&existing); err != nil {
+			return err
 		}
 		if _, err := tx.ExecContext(r.Context(), `
 			UPDATE groups SET name = $1, leader_user_id = $2 WHERE id = $3
@@ -400,9 +481,9 @@ func (h *AdminAPIHandler) UpdateGroup(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			WriteError(w, http.StatusNotFound, "Group tidak ditemukan")
-		case err.Error() == "leader_not_found":
+		case errors.Is(err, errLeaderNotFound):
 			WriteError(w, http.StatusUnprocessableEntity, "Leader yang dipilih tidak ditemukan")
-		case err.Error() == "leader_inactive":
+		case errors.Is(err, errLeaderInactive):
 			WriteError(w, http.StatusUnprocessableEntity, "Leader group harus merupakan pengguna yang aktif")
 		case isUniqueViolation(err):
 			WriteError(w, http.StatusConflict, "Nama group sudah digunakan")
@@ -512,7 +593,7 @@ func (h *AdminAPIHandler) RemoveGroupMember(w http.ResponseWriter, r *http.Reque
 			return err
 		}
 		if leaderID.Valid && leaderID.String == userID {
-			return errors.New("cannot_remove_leader")
+			return errCannotRemoveLeader
 		}
 		res, err := tx.ExecContext(r.Context(), `DELETE FROM user_groups WHERE user_id = $1 AND group_id = $2`, userID, groupID)
 		if err != nil {
@@ -525,7 +606,7 @@ func (h *AdminAPIHandler) RemoveGroupMember(w http.ResponseWriter, r *http.Reque
 	})
 	if err != nil {
 		switch {
-		case err.Error() == "cannot_remove_leader":
+		case errors.Is(err, errCannotRemoveLeader):
 			WriteError(w, http.StatusConflict, "Ganti leader group terlebih dahulu sebelum menghapus user ini dari group")
 		case errors.Is(err, sql.ErrNoRows):
 			WriteError(w, http.StatusNotFound, "Keanggotaan tidak ditemukan")

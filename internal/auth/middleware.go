@@ -33,7 +33,7 @@ type User struct {
 func RequireAuth(db *sql.DB, secureCookie bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			isAPI := strings.HasPrefix(r.URL.Path, "/api/")
+			isAPI := strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/metrics"
 			denyUnauth := func(msg string) {
 				if isAPI {
 					w.Header().Set("Content-Type", "application/json")

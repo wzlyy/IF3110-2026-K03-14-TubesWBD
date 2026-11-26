@@ -46,6 +46,25 @@ func DecodeJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any)
 	return nil
 }
 
+// DecodeOptionalJSON membaca body JSON opsional; body kosong diperbolehkan, sedangkan JSON rusak/kebesaran ditolak.
+func DecodeOptionalJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any) error {
+	if r.Body == nil || r.ContentLength == 0 {
+		return nil
+	}
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxJSONBytes
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(dst); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return errors.New("format JSON request tidak valid")
+	}
+	return nil
+}
+
 // HandleDomainError memetakan error domain ke kode status HTTP REST yang konsisten.
 func HandleDomainError(w http.ResponseWriter, err error) {
 	if err == nil {

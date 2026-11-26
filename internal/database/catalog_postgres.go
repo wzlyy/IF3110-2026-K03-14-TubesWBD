@@ -116,7 +116,7 @@ func loadPostgresCatalog(ctx context.Context, tx postgresTxQuerier, dbName strin
 	if err != nil {
 		return nil, err
 	}
-	rows, err = tx.QueryContext(ctx, `SELECT t.oid::bigint,i.relname,am.amname,ix.indisunique,ix.indisprimary,pg_catalog.pg_get_indexdef(i.oid),
+	rows, err = tx.QueryContext(ctx, `SELECT t.oid::bigint,i.relname,am.amname,ix.indisunique,ix.indisprimary,ix.indpred IS NOT NULL,NOT ix.indisvalid,pg_catalog.pg_get_indexdef(i.oid),
  COALESCE((SELECT json_agg(pg_catalog.pg_get_indexdef(i.oid,k,true) ORDER BY k)::text FROM generate_series(1,ix.indnkeyatts) k),'[]')
  FROM pg_catalog.pg_index ix JOIN pg_catalog.pg_class t ON t.oid=ix.indrelid JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace JOIN pg_catalog.pg_class i ON i.oid=ix.indexrelid JOIN pg_catalog.pg_am am ON am.oid=i.relam
  WHERE t.relkind IN ('r','p') AND `+userSchemaPredicate+` ORDER BY t.oid,i.relname`)
@@ -127,7 +127,7 @@ func loadPostgresCatalog(ctx context.Context, tx postgresTxQuerier, dbName strin
 		var oid int64
 		var index Index
 		var columns string
-		if err = rows.Scan(&oid, &index.Name, &index.Type, &index.Unique, &index.Primary, &index.Definition, &columns); err != nil {
+		if err = rows.Scan(&oid, &index.Name, &index.Type, &index.Unique, &index.Primary, &index.Partial, &index.Invalid, &index.Definition, &columns); err != nil {
 			rows.Close()
 			return nil, err
 		}

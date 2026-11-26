@@ -81,7 +81,125 @@ var (
 	batchIdentRe  = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 	batchUpdateRe = regexp.MustCompile(`(?is)^UPDATE\s+([a-zA-Z_][\w]*(?:\.[a-zA-Z_][\w]*)?)\s+SET\s+(.+)$`)
 	batchWhereRe  = regexp.MustCompile(`(?i)\s+WHERE\s+`)
+	indexWhereRe  = regexp.MustCompile(`(?i)\bWHERE\b`)
 )
+
+// maskSQL replaces SQL string literals (and optionally double-quoted identifiers)
+// with spaces of identical byte length while preserving comments verbatim so
+// keyword checks never false-positive inside literals and byte offsets align.
+func maskSQL(s string, maskDoubleQuotes bool) string {
+	var out strings.Builder
+	out.Grow(len(s))
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c == '-' && i+1 < len(s) && s[i+1] == '-' {
+			start := i
+			end := strings.IndexByte(s[i:], '\n')
+			if end < 0 {
+				i = len(s)
+			} else {
+				i += end + 1
+			}
+			out.WriteString(s[start:i])
+			continue
+		}
+		if c == '/' && i+1 < len(s) && s[i+1] == '*' {
+			start := i
+			i += 2
+			depth := 1
+			for i < len(s) && depth > 0 {
+				if i+1 < len(s) && s[i:i+2] == "/*" {
+					depth++
+					i += 2
+				} else if i+1 < len(s) && s[i:i+2] == "*/" {
+					depth--
+					i += 2
+				} else {
+					i++
+				}
+			}
+			out.WriteString(s[start:i])
+			continue
+		}
+		if c == '\'' || c == '"' {
+			quote := c
+			shouldMask := quote == '\'' || maskDoubleQuotes
+			backslash := quote == '\'' && i > 0 && (s[i-1] == 'e' || s[i-1] == 'E') && (i < 2 || !isIdentifier(s[i-2]))
+			out.WriteByte(quote)
+			i++
+			for i < len(s) {
+				if s[i] == '\\' && backslash {
+					if i+1 < len(s) {
+						if shouldMask {
+							out.WriteString("  ")
+						} else {
+							out.WriteString(s[i : i+2])
+						}
+						i += 2
+					} else {
+						if shouldMask {
+							out.WriteByte(' ')
+						} else {
+							out.WriteByte(s[i])
+						}
+						i++
+					}
+					continue
+				}
+				if s[i] == quote {
+					if i+1 < len(s) && s[i+1] == quote {
+						if shouldMask {
+							out.WriteString("  ")
+						} else {
+							out.WriteString(s[i : i+2])
+						}
+						i += 2
+						continue
+					}
+					out.WriteByte(quote)
+					i++
+					break
+				}
+				if shouldMask {
+					out.WriteByte(' ')
+				} else {
+					out.WriteByte(s[i])
+				}
+				i++
+			}
+			continue
+		}
+		if c == '$' {
+			j := i + 1
+			for j < len(s) && isIdentifier(s[j]) && s[j] != '$' {
+				j++
+			}
+			if j < len(s) && s[j] == '$' && (j == i+1 || s[i+1] < '0' || s[i+1] > '9') {
+				tag := s[i : j+1]
+				if end := strings.Index(s[j+1:], tag); end >= 0 {
+					out.WriteString(tag)
+					for k := 0; k < end; k++ {
+						out.WriteByte(' ')
+					}
+					out.WriteString(tag)
+					i = j + 1 + end + len(tag)
+					continue
+				}
+			}
+		}
+		out.WriteByte(c)
+		i++
+	}
+	return out.String()
+}
+
+func maskSQLStringLiterals(s string) string {
+	return maskSQL(s, false)
+}
+
+func indexHasPredicate(def string) bool {
+	return indexWhereRe.MatchString(maskSQL(def, true))
+}
 
 func stripLeadingSQLComments(s string) string {
 	for {
@@ -149,21 +267,29 @@ func BuildBatchUpdateSQL(query, batchTable, cursorCol string) (sanitizedTable, s
 	if len(match) != 3 || !(strings.EqualFold(match[1], batchTable) || strings.EqualFold("public."+match[1], batchTable) || strings.EqualFold(match[1], "public."+batchTable)) {
 		return "", "", "", errors.New("batch UPDATE must target configured table")
 	}
-	parts := batchWhereRe.Split(match[2], -1)
-	if len(parts) > 2 {
+	rawRest := match[2]
+	maskedRest := maskSQLStringLiterals(rawRest)
+	whereLocs := batchWhereRe.FindAllStringIndex(maskedRest, -1)
+	if len(whereLocs) > 1 {
 		return "", "", "", errors.New("unsupported nested WHERE in batch UPDATE")
 	}
-	if len(parts) == 2 && !regexp.MustCompile(`(?i)^\s*`+regexp.QuoteMeta(cursorCol)+`\s+BETWEEN\s+\$1\s+AND\s+\$2\s*$`).MatchString(parts[1]) {
-		return "", "", "", errors.New("batch WHERE must use cursor BETWEEN $1 AND $2")
+	setRaw, setMasked := rawRest, maskedRest
+	if len(whereLocs) == 1 {
+		whereClause := rawRest[whereLocs[0][1]:]
+		if !regexp.MustCompile(`(?i)^\s*` + regexp.QuoteMeta(cursorCol) + `\s+BETWEEN\s+\$1\s+AND\s+\$2\s*$`).MatchString(whereClause) {
+			return "", "", "", errors.New("batch WHERE must use cursor BETWEEN $1 AND $2")
+		}
+		setRaw = rawRest[:whereLocs[0][0]]
+		setMasked = maskedRest[:whereLocs[0][0]]
 	}
-	if strings.Contains(parts[0], "--") || strings.Contains(parts[0], "/*") || regexp.MustCompile(`(?i)\b(FROM|RETURNING)\b`).MatchString(parts[0]) {
+	if strings.Contains(setMasked, "--") || strings.Contains(setMasked, "/*") || regexp.MustCompile(`(?i)\b(FROM|RETURNING)\b`).MatchString(setMasked) {
 		return "", "", "", errors.New("unsupported batch UPDATE clause")
 	}
 	// Batch statements cannot change the key used for streaming and undo.
-	if regexp.MustCompile(`(?i)(^|,)\s*"?`+regexp.QuoteMeta(cursorCol)+`"?\s*=`).MatchString(parts[0]) || strings.HasPrefix(strings.TrimSpace(parts[0]), "(") {
+	if regexp.MustCompile(`(?i)(^|,)\s*"?`+regexp.QuoteMeta(cursorCol)+`"?\s*=`).MatchString(setMasked) || strings.HasPrefix(strings.TrimSpace(setMasked), "(") {
 		return "", "", "", errors.New("batch cursor must remain immutable")
 	}
-	statement = "UPDATE " + sanitizedTable + " SET " + parts[0] + " WHERE " + sanitizedCol + " BETWEEN $1 AND $2"
+	statement = "UPDATE " + sanitizedTable + " SET " + strings.TrimSpace(setRaw) + " WHERE " + sanitizedCol + " BETWEEN $1 AND $2"
 	return sanitizedTable, sanitizedCol, statement, nil
 }
 
@@ -277,7 +403,7 @@ func ValidateBatchTargetCatalog(catalog *database.Catalog, batchTable, cursorCol
 	}
 	if !isUniqueKey {
 		for _, idx := range tbl.Indexes {
-			if (idx.Primary || idx.Unique) && len(idx.Columns) == 1 && strings.Trim(idx.Columns[0], `"`) == cursorCol {
+			if (idx.Primary || idx.Unique) && !idx.Partial && !idx.Invalid && !indexHasPredicate(idx.Definition) && len(idx.Columns) == 1 && strings.Trim(idx.Columns[0], `"`) == cursorCol {
 				isUniqueKey = true
 				break
 			}

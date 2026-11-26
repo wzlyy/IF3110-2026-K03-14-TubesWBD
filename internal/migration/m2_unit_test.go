@@ -95,6 +95,57 @@ func TestValidateDefinitionInput(t *testing.T) {
 		}
 	})
 
+	t.Run("batch mode allows keywords and comment tokens inside string literals", func(t *testing.T) {
+		cases := []struct {
+			name string
+			sql  string
+			want string
+		}{
+			{
+				name: "from and where inside single quotes",
+				sql:  "UPDATE orders SET note = 'migrated from v1 where id = 1' WHERE id BETWEEN $1 AND $2;",
+				want: `UPDATE "orders" SET note = 'migrated from v1 where id = 1' WHERE "id" BETWEEN $1 AND $2`,
+			},
+			{
+				name: "returning and comment tokens inside escaped quotes",
+				sql:  "UPDATE orders SET note = E'it\\'s returning -- /* not a comment' WHERE id BETWEEN $1 AND $2;",
+				want: `UPDATE "orders" SET note = E'it\'s returning -- /* not a comment' WHERE "id" BETWEEN $1 AND $2`,
+			},
+			{
+				name: "doubled quotes and cursor text inside literal",
+				sql:  "UPDATE orders SET note = 'a'', id = 99, from x';",
+				want: `UPDATE "orders" SET note = 'a'', id = 99, from x' WHERE "id" BETWEEN $1 AND $2`,
+			},
+			{
+				name: "dollar-quoted string literal",
+				sql:  "UPDATE orders SET note = $tag$from a where b returning c -- /*$tag$ WHERE id BETWEEN $1 AND $2;",
+				want: `UPDATE "orders" SET note = $tag$from a where b returning c -- /*$tag$ WHERE "id" BETWEEN $1 AND $2`,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, _, built, err := BuildBatchUpdateSQL(tc.sql, "orders", "id")
+				if err != nil {
+					t.Fatalf("BuildBatchUpdateSQL(%q) unexpected error: %v", tc.sql, err)
+				}
+				if built != tc.want {
+					t.Fatalf("BuildBatchUpdateSQL(%q) = %q, want %q", tc.sql, built, tc.want)
+				}
+				if _, _, err := ValidateDefinitionInput(DefinitionInput{
+					Name:              tc.name,
+					SQLUp:             tc.sql,
+					SQLDown:           "UPDATE orders SET note = 'reverted' WHERE id BETWEEN $1 AND $2;",
+					ExecutionMode:     ModeBatch,
+					BatchTable:        "orders",
+					BatchCursorColumn: "id",
+					BatchSize:         &bs,
+				}); err != nil {
+					t.Fatalf("ValidateDefinitionInput(%q) unexpected error: %v", tc.sql, err)
+				}
+			})
+		}
+	})
+
 	t.Run("batch mode rejects incompatible SQL clauses matching worker batchSpec", func(t *testing.T) {
 		badCases := []struct {
 			name string
@@ -209,12 +260,44 @@ func TestValidateBatchTargetCatalog(t *testing.T) {
 					{Name: "id", DataType: "bigint"},
 					{Name: "code", DataType: "text"},
 					{Name: "opt_code", DataType: "text", Nullable: true},
+					{Name: "ext_id", DataType: "text"},
+					{Name: "partial_code", DataType: "text"},
+					{Name: "partial_flagged", DataType: "text"},
+					{Name: "invalid_code", DataType: "text"},
 					{Name: "status", DataType: "text"},
 				},
 				Constraints: []database.Constraint{
 					{Name: "orders_pkey", Type: "PRIMARY KEY", Columns: []string{"id"}},
 					{Name: "orders_code_key", Type: "UNIQUE", Columns: []string{"code"}},
 					{Name: "orders_opt_code_key", Type: "UNIQUE", Columns: []string{"opt_code"}},
+				},
+				Indexes: []database.Index{
+					{
+						Name:       "orders_ext_id_uidx",
+						Columns:    []string{"ext_id"},
+						Unique:     true,
+						Definition: "CREATE UNIQUE INDEX orders_ext_id_uidx ON public.orders USING btree (ext_id)",
+					},
+					{
+						Name:       "orders_partial_code_uidx",
+						Columns:    []string{"partial_code"},
+						Unique:     true,
+						Definition: "CREATE UNIQUE INDEX orders_partial_code_uidx ON public.orders USING btree (partial_code) WHERE (status = 'active'::text)",
+					},
+					{
+						Name:       "orders_partial_flagged_uidx",
+						Columns:    []string{"partial_flagged"},
+						Unique:     true,
+						Partial:    true,
+						Definition: "CREATE UNIQUE INDEX orders_partial_flagged_uidx ON public.orders USING btree (partial_flagged)",
+					},
+					{
+						Name:       "orders_invalid_code_uidx",
+						Columns:    []string{"invalid_code"},
+						Unique:     true,
+						Invalid:    true,
+						Definition: "CREATE UNIQUE INDEX orders_invalid_code_uidx ON public.orders USING btree (invalid_code)",
+					},
 				},
 			}},
 		}},
@@ -225,6 +308,18 @@ func TestValidateBatchTargetCatalog(t *testing.T) {
 	}
 	if err := ValidateBatchTargetCatalog(cat, "public.orders", "code"); err != nil {
 		t.Fatalf("expected UNIQUE cursor column to pass: %v", err)
+	}
+	if err := ValidateBatchTargetCatalog(cat, "public.orders", "ext_id"); err != nil {
+		t.Fatalf("expected full valid UNIQUE index cursor column to pass: %v", err)
+	}
+	if err := ValidateBatchTargetCatalog(cat, "public.orders", "partial_code"); !errors.Is(err, ErrBatchColumnInvalid) {
+		t.Fatalf("expected partial UNIQUE index (WHERE predicate) to fail, got %v", err)
+	}
+	if err := ValidateBatchTargetCatalog(cat, "public.orders", "partial_flagged"); !errors.Is(err, ErrBatchColumnInvalid) {
+		t.Fatalf("expected partial UNIQUE index (Partial=true) to fail, got %v", err)
+	}
+	if err := ValidateBatchTargetCatalog(cat, "public.orders", "invalid_code"); !errors.Is(err, ErrBatchColumnInvalid) {
+		t.Fatalf("expected invalid UNIQUE index to fail, got %v", err)
 	}
 	if err := ValidateBatchTargetCatalog(cat, "public.orders", "opt_code"); !errors.Is(err, ErrBatchColumnInvalid) {
 		t.Fatalf("expected nullable UNIQUE cursor column to fail, got %v", err)

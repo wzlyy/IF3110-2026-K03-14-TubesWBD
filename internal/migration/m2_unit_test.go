@@ -487,32 +487,45 @@ func TestFailedAttemptDoesNotBlockAnotherMigrationForward(t *testing.T) {
 	}
 }
 func TestPartialRollbackContinuationHistory(t *testing.T) {
-	base := []ExecutionRecord{
-		{ExecutionID: "applied", MigrationID: "M", ActionType: ActionUp, Status: ExecStatusSuccess},
-		{ExecutionID: "rollback", MigrationID: "M", ActionType: ActionRollback, RevertedExecutionID: "applied", Status: ExecStatusPartial},
-		{ExecutionID: "retry", MigrationID: "M", ActionType: ActionResumeBatch, ParentExecutionID: "rollback", Status: ExecStatusPartial},
-	}
-	for _, action := range []string{ActionResumeBatch, ActionRevertBatch} {
-		t.Run(action, func(t *testing.T) {
-			done := ExecutionRecord{ExecutionID: "done", MigrationID: "M", ActionType: action, ParentExecutionID: "retry", Status: ExecStatusSuccess}
-			if action == ActionRevertBatch {
-				done.RevertedExecutionID = "retry"
-			}
-			history := append(base, done)
-			state := ComputeActiveState(history)
-			reverted := action == ActionRevertBatch
-			if state.BlockingExecution != nil || state.AppliedMigrationIDs["M"] != reverted || state.RolledBackMigrations["M"] == reverted {
-				t.Fatalf("unexpected state: %+v", state)
-			}
-			if reverted && (state.ActiveTip == nil || state.ActiveTip.ExecutionID != "applied") || !reverted && state.ActiveTip != nil {
-				t.Fatalf("unexpected active tip: %+v", state.ActiveTip)
-			}
-			visible, hidden := FilterHistory(history, true)
-			if hidden != 2 || len(visible) != 2 || (visible[0].ExecutionID == "applied") != reverted {
-				t.Fatalf("unexpected filtered history: %+v", visible)
-			}
-		})
-	}
+	defM := Definition{ID: "M", Version: 1}
+
+	t.Run("partially_reverted_rollback_completed_by_revert_batch", func(t *testing.T) {
+		history := []ExecutionRecord{
+			{ExecutionID: "applied", MigrationID: "M", MigrationVersion: 1, ActionType: ActionUp, Status: ExecStatusSuccess},
+			{ExecutionID: "rollback", MigrationID: "M", MigrationVersion: 1, ActionType: ActionRollback, RevertedExecutionID: "applied", Status: ExecStatusPartiallyReverted},
+			{ExecutionID: "done", MigrationID: "M", MigrationVersion: 1, ActionType: ActionRevertBatch, ParentExecutionID: "rollback", RevertedExecutionID: "rollback", Status: ExecStatusSuccess},
+		}
+		state := ComputeActiveState(history)
+		if state.BlockingExecution != nil || state.AppliedMigrationIDs["M"] || !state.RolledBackMigrations["M"] || state.ActiveTip != nil {
+			t.Fatalf("unexpected state: %+v", state)
+		}
+		visible, hidden := FilterHistory(history, true)
+		if hidden != 2 || len(visible) != 1 || visible[0].ExecutionID != "rollback" {
+			t.Fatalf("unexpected filtered history: hidden=%d visible=%+v", hidden, visible)
+		}
+		if err := ValidateLinearForward(defM, []Definition{defM}, state); err != nil {
+			t.Fatalf("ValidateLinearForward returned unexpected error: %v", err)
+		}
+	})
+
+	t.Run("partial_up_completed_by_multi_step_revert_batch", func(t *testing.T) {
+		history := []ExecutionRecord{
+			{ExecutionID: "up", MigrationID: "M", MigrationVersion: 1, ActionType: ActionUp, Status: ExecStatusPartial},
+			{ExecutionID: "retry", MigrationID: "M", MigrationVersion: 1, ActionType: ActionResumeBatch, ParentExecutionID: "up", Status: ExecStatusPartial},
+			{ExecutionID: "done", MigrationID: "M", MigrationVersion: 1, ActionType: ActionRevertBatch, ParentExecutionID: "retry", RevertedExecutionID: "retry", Status: ExecStatusSuccess},
+		}
+		state := ComputeActiveState(history)
+		if state.BlockingExecution != nil || state.AppliedMigrationIDs["M"] || !state.RolledBackMigrations["M"] || state.ActiveTip != nil {
+			t.Fatalf("unexpected state: %+v", state)
+		}
+		visible, hidden := FilterHistory(history, true)
+		if hidden != 2 || len(visible) != 1 || visible[0].ExecutionID != "up" {
+			t.Fatalf("unexpected filtered history: hidden=%d visible=%+v", hidden, visible)
+		}
+		if err := ValidateLinearForward(defM, []Definition{defM}, state); err != nil {
+			t.Fatalf("ValidateLinearForward returned unexpected error: %v", err)
+		}
+	})
 }
 
 func TestParseBatchUpdateSQLQuotedCommentsSelectiveWhereAndRejections(t *testing.T) {

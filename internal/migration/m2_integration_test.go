@@ -386,27 +386,41 @@ func TestM2EndToEndWorkflowApprovalsHistoryAndAccessDenial(t *testing.T) {
 		t.Fatalf("GET /jobs/{job_id} = %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// A second continuation must preview the root attempt, even when the
-	// immediate parent stored a different snapshot.
-	root, retry := uuid.NewString(), uuid.NewString()
-	insertExec(root, "rollback", e4ID, "partial", "SELECT 42", 4*time.Second)
-	insertExec(retry, "resume_batch", "", "partial", "SELECT 99", 5*time.Second)
-	if _, err := env.db.ExecContext(ctx, "UPDATE migration_executions SET parent_execution_id=$1 WHERE execution_id=$2", root, retry); err != nil {
+	// A second continuation for partial up previews the root executed_sql_snapshot,
+	// while revert_batch against a partially_reverted rollback always previews sql_down.
+	upRoot, upRetry := uuid.NewString(), uuid.NewString()
+	insertExec(upRoot, "up", "", "partial", "SELECT 42", 4*time.Second)
+	insertExec(upRetry, "resume_batch", "", "partial", "SELECT 99", 5*time.Second)
+	if _, err := env.db.ExecContext(ctx, "UPDATE migration_executions SET parent_execution_id=$1 WHERE execution_id=$2", upRoot, upRetry); err != nil {
 		t.Fatal(err)
 	}
-	for action, want := range map[string]string{"resume_batch": "SELECT 42", "revert_batch": migA.SQLUp} {
+	rbRoot, rbRetry := uuid.NewString(), uuid.NewString()
+	insertExec(rbRoot, "rollback", e4ID, "partially_reverted", migA.SQLDown, 6*time.Second)
+	insertExec(rbRetry, "revert_batch", rbRoot, "partially_reverted", migA.SQLDown, 7*time.Second)
+	if _, err := env.db.ExecContext(ctx, "UPDATE migration_executions SET parent_execution_id=$1 WHERE execution_id=$2", rbRoot, rbRetry); err != nil {
+		t.Fatal(err)
+	}
+	previewCases := []struct {
+		action string
+		target string
+		want   string
+	}{
+		{action: "resume_batch", target: upRetry, want: "SELECT 42"},
+		{action: "revert_batch", target: rbRetry, want: migA.SQLDown},
+	}
+	for _, tc := range previewCases {
 		id := uuid.NewString()
 		if _, err := env.db.ExecContext(ctx, `INSERT INTO migration_requests
 			(id,database_id,migration_id,action_type,target_execution_id) VALUES ($1,$2,$3,$4,$5)`,
-			id, env.db1ID, migA.ID, action, retry); err != nil {
+			id, env.db1ID, migA.ID, tc.action, tc.target); err != nil {
 			t.Fatal(err)
 		}
 		detail, err := migration.GetRequestDetail(ctx, env.db, id)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if detail.SQLPreview != want {
-			t.Fatalf("%s preview = %q, want %q", action, detail.SQLPreview, want)
+		if detail.SQLPreview != tc.want {
+			t.Fatalf("%s preview = %q, want %q", tc.action, detail.SQLPreview, tc.want)
 		}
 	}
 

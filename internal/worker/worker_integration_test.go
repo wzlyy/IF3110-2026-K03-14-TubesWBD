@@ -16,6 +16,7 @@ import (
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/config"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/database"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/lock"
+	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/migration"
 	"github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/internal/queue"
 )
 
@@ -659,4 +660,63 @@ func TestWorkerRepairMigrationClearsPartialAfterIrreversibleOrFailedRevert(t *te
 			t.Fatalf("expected lock released after repair migration, got %v", err)
 		}
 	})
+}
+
+func TestWorkerBatchRollbackPartiallyRevertedThenRevertBatchCompletes(t *testing.T) {
+	f := newFixture(t, "TARGET_PG")
+	ctx := context.Background()
+
+	e1 := f.newJob("batch", "UPDATE "+f.table+" SET v=v+1")
+	f.run(e1, "success")
+	f.sum(8)
+
+	// Corrupt row 1 so batch rollback commits trailing batches and fails halfway as partially_reverted.
+	f.exec(f.target, "UPDATE "+f.table+" SET v=100 WHERE id=1")
+	e2 := f.request(e1.MigrationID, "batch", "rollback", e1.ExecutionID)
+	f.run(e2, "partially_reverted")
+	f.sum(101)
+
+	e3 := f.request(e1.MigrationID, "batch", "revert_batch", e2.ExecutionID)
+	detail, err := migration.GetRequestDetail(ctx, f.s.DB, e3.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDown := "UPDATE " + f.table + " SET v=0"
+	if detail.SQLPreview != wantDown {
+		t.Fatalf("revert_batch SQLPreview = %q, want %q", detail.SQLPreview, wantDown)
+	}
+
+	f.exec(f.target, "UPDATE "+f.table+" SET v=1 WHERE id=1")
+	f.run(e3, "success")
+	f.sum(0)
+
+	hist, err := migration.ListHistoryM2(ctx, f.s.DB, f.dbID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hist.ActiveTip != nil {
+		t.Fatalf("expected ActiveTip == nil after revert_batch finishes rollback, got %+v", hist.ActiveTip)
+	}
+	if hist.Blocking != nil {
+		t.Fatalf("expected Blocking == nil, got %+v", hist.Blocking)
+	}
+	if hist.HiddenCount != 2 {
+		t.Fatalf("HiddenCount = %d, want 2", hist.HiddenCount)
+	}
+
+	all, err := migration.ListAllExecutionsChronological(ctx, f.s.DB, f.dbID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := migration.ComputeActiveState(all)
+	if state.AppliedMigrationIDs[e1.MigrationID] {
+		t.Fatalf("expected migration %s not marked applied", e1.MigrationID)
+	}
+	if !state.RolledBackMigrations[e1.MigrationID] {
+		t.Fatalf("expected migration %s marked rolled back", e1.MigrationID)
+	}
+
+	e4 := f.request(e1.MigrationID, "batch", "forward", "")
+	f.run(e4, "success")
+	f.sum(8)
 }

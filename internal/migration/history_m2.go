@@ -134,19 +134,35 @@ func rollbackEffects(records []ExecutionRecord) (map[string]struct{}, map[string
 		}
 		root := r
 		if r.ActionType == ActionResumeBatch || r.ActionType == ActionRevertBatch {
+			seen := map[string]struct{}{root.ExecutionID: {}}
 			for root.ParentExecutionID != "" {
-				root = byID[root.ParentExecutionID]
+				if _, cycle := seen[root.ParentExecutionID]; cycle {
+					break
+				}
+				seen[root.ParentExecutionID] = struct{}{}
+				parent, ok := byID[root.ParentExecutionID]
+				if !ok {
+					break
+				}
+				root = parent
 			}
 		}
 		var target string
 		switch {
-		case r.ActionType == ActionRevertBatch:
-			target = r.RevertedExecutionID
-			if root.ActionType != ActionRollback {
-				rolledBack[r.MigrationID] = true
-			}
 		case root.ActionType == ActionRollback:
 			target = root.RevertedExecutionID
+			if target == "" {
+				target = r.RevertedExecutionID
+			}
+			if target == "" {
+				target = root.ExecutionID
+			}
+			rolledBack[r.MigrationID] = true
+		case r.ActionType == ActionRevertBatch:
+			target = r.RevertedExecutionID
+			if target == "" {
+				target = root.ExecutionID
+			}
 			rolledBack[r.MigrationID] = true
 		}
 		if target != "" {

@@ -3,126 +3,291 @@
   min-width: 0;
   overflow-wrap: anywhere;
 }
-.m2 header,
+
+.m2 header {
+  margin-bottom: 1.25rem;
+}
+
 .m2-panel {
   margin-bottom: 1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: clamp(1rem, 2vw, 1.5rem);
+  background: #ffffff;
+  color: var(--ink);
+  box-shadow: var(--shadow-sm);
 }
-.m2-panel {
-  margin-top: 1rem;
-  border: 1px solid #cbd5df;
-  border-radius: 0.65rem;
-  padding: clamp(0.8rem, 2vw, 1.4rem);
-  background: white;
-  color: #192936;
+
+.m2-panel-accent {
+  position: relative;
+  overflow: hidden;
 }
+
+.m2-panel-accent::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--brand-gradient);
+}
+
 .m2 fieldset {
   min-width: 0;
   padding: 0;
   border: 0;
 }
+
+.m2-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  gap: 0.85rem;
+  margin-bottom: 0.75rem;
+}
+
 .m2 label:not(.check) {
-  display: block;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
   margin: 0.65rem 0;
 }
+
+.m2-form-grid label:not(.check) {
+  margin: 0;
+}
+
 .m2 label.check {
-  margin: 0.65rem 0;
+  margin: 0.75rem 0;
 }
+
 .m2 input[type="checkbox"] {
-  width: auto;
+  width: 1rem;
+  height: 1rem;
   flex: 0 0 auto;
 }
-.m2 label:not(.check) :is(textarea, select, input:not([type="checkbox"])) {
-  display: block;
-  box-sizing: border-box;
-  width: 100%;
-  margin: 0.25rem 0;
-  padding: 0.55rem;
-  border: 1px solid #a4b3c1;
-  border-radius: 0.4rem;
-}
+
 .m2 .m2-sql,
 .m2 pre {
-  font-family: Consolas, monospace;
+  font-family: "JetBrains Mono", "IBM Plex Mono", Consolas, monospace;
   overflow: auto;
   max-width: 100%;
 }
+
 .m2 .m2-sql {
-  height: 8rem;
+  height: 9rem;
   resize: vertical;
+  background: #f8fafc;
+  color: #0f172a;
+  line-height: 1.5;
 }
+
 .m2 pre {
-  max-height: 16rem;
-  padding: 0.8rem;
+  max-height: 18rem;
+  padding: 0.9rem 1rem;
   white-space: pre;
-  background: #eff3f6;
-  color: #172e42;
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: var(--radius-sm);
+  margin-top: 0.45rem;
 }
+
+.m2-sql-split {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));
+  gap: 0.85rem;
+  margin-top: 0.75rem;
+}
+
 .m2 .m2-scroll {
   max-width: 100%;
   overflow-x: auto;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
 }
+
+.m2-panel .m2-scroll {
+  box-shadow: none;
+}
+
 .m2 table {
   border-collapse: collapse;
   width: 100%;
 }
+
 .m2 td,
 .m2 th {
-  padding: 0.6rem;
+  padding: 0.72rem 0.9rem;
   text-align: left;
   vertical-align: top;
-  border-bottom: 1px solid #d7dfe7;
-  min-width: 6rem;
+  border-bottom: 1px solid var(--line);
+  min-width: 6.5rem;
 }
+
 .m2 small {
   display: block;
+  font-size: 0.78rem;
+  color: var(--ink-subtle);
+  margin-top: 0.15rem;
 }
-.m2-actions,
+
+.m2-actions {
+  display: inline-grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  align-items: stretch;
+  gap: 0.55rem;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0.75rem 0;
+}
+
+.m2-actions > :is(button, a) {
+  width: 100%;
+  justify-content: center;
+  white-space: nowrap;
+}
+
+.m2 dialog .m2-actions {
+  display: grid;
+  margin-left: auto;
+}
+
+@media (max-width: 780px) {
+  .m2-actions {
+    display: grid;
+    grid-auto-flow: row;
+    grid-template-columns: 1fr;
+    width: 100%;
+  }
+
+  .m2 td > .m2-actions {
+    display: inline-grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+    width: fit-content;
+  }
+}
+
 .m2-stages {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.6rem;
   align-items: center;
-  margin: 0.65rem 0;
-}
-.m2-stages {
-  padding: 0;
+  margin: 0.75rem 0;
+  padding: 0.75rem;
   list-style: none;
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  gap: 0.45rem;
 }
+
 .m2-stages li {
-  padding: 0.2rem 0.45rem;
-  border-bottom: 2px solid #c6ced5;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.38rem 0.72rem;
+  border-radius: 999px;
+  font-size: 0.81rem;
+  font-weight: 600;
+  color: var(--ink-subtle);
+  background: #ffffff;
+  border: 1px solid var(--line);
 }
+
 .m2-stages [aria-current] {
-  border-color: #10695e;
-  font-weight: bold;
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #ffffff;
+  box-shadow: 0 2px 6px rgba(79, 70, 229, 0.28);
 }
+
+.m2-stages li.done-step {
+  background: var(--success-soft);
+  border-color: var(--success-border);
+  color: #047857;
+}
+
 .m2 dialog {
-  width: min(40rem, 92vw);
+  width: min(44rem, 94vw);
   box-sizing: border-box;
   max-height: 85vh;
   overflow: auto;
-  padding: 1.25rem;
-  border: 1px solid #a4b3c1;
-  border-radius: 0.6rem;
+  padding: 1.5rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  background: #ffffff;
+  color: var(--ink);
 }
+
 .m2 dialog::backdrop {
-  background: #10253599;
+  background: rgba(15, 23, 42, 0.5);
+  backdrop-filter: blur(3px);
 }
+
 .m2-error {
-  color: #9d3026;
+  color: #b91c1c;
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-sm);
+  padding: 0.65rem 0.85rem;
+  font-size: 0.86rem;
+  margin: 0.55rem 0;
 }
+
 .m2 td small.m2-error {
   white-space: normal;
   max-width: 24rem;
+  padding: 0.3rem 0.5rem;
+  margin-top: 0.3rem;
 }
+
+.m2-status-msg {
+  color: #047857;
+  font-weight: 600;
+  font-size: 0.86rem;
+  margin-top: 0.5rem;
+}
+
 .m2-badge {
-  display: inline-block;
-  padding: 0.15rem 0.45rem;
-  border-radius: 4px;
-  background: #e0eee9;
-  color: #174d40;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.58rem;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 650;
+  font-family: "JetBrains Mono", "IBM Plex Mono", Consolas, monospace;
+  background: var(--primary-soft);
+  color: var(--primary-hover);
+  border: 1px solid #c7d2fe;
 }
+
 .m2 progress {
   width: 100%;
-  accent-color: #1c6c61;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  accent-color: var(--primary);
+}
+
+.m2-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+  margin: 0.4rem 0 0.55rem;
+}
+
+.m2-hint {
+  font-size: 0.82rem;
+  color: var(--ink-subtle);
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 0.6rem 0.8rem;
+  margin: 0.5rem 0;
 }

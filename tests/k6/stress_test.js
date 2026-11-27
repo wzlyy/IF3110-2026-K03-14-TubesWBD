@@ -1,6 +1,5 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
-import exec from 'k6/execution';
 import { Counter, Rate, Trend } from 'k6/metrics';
 import { textSummary } from 'https://jslib.k6.io/k6-summary/0.0.4/index.js';
 
@@ -32,15 +31,11 @@ const JOB_STAGE_WINDOWS = [
   { name: 'recovery_10vu', startMs: 120000, endMs: 148000, weight: 0.15 },
 ];
 
-function scheduledJobWindow(item, total) {
+function scheduledStageWindow(index, total) {
   if (JOB_MODE === 'burst' || total <= 1) {
-    const pairDelay = item.scenarioType === 'same_db' ? item.pairIndex * 3000 + item.pairSlot * 15 : 0;
-    return { offsetMs: 15000 + pairDelay, stage: 'baseline_10vu' };
+    return { offsetMs: 15000, stage: 'baseline_10vu' };
   }
-  // Kelompokkan job same_db per pasangan (2 job berdekatan) agar memicu kontensi distributed lock
-  // tanpa saling menyalip urutan versi linear, sambil menyebar beban di semua tahap VU.
-  const effectiveIdx = item.scenarioType === 'same_db' ? item.pairIndex * 2 : item.typeIndex;
-  const progress = (effectiveIdx + 0.5) / total;
+  const progress = (index + 0.5) / total;
   let cumulative = 0;
   for (let i = 0; i < JOB_STAGE_WINDOWS.length; i++) {
     const win = JOB_STAGE_WINDOWS[i];
@@ -48,41 +43,14 @@ function scheduledJobWindow(item, total) {
     cumulative += win.weight;
     if (progress <= cumulative || i === JOB_STAGE_WINDOWS.length - 1) {
       const localProgress = Math.min(1, Math.max(0, (progress - prev) / win.weight));
-      const baseOffset = Math.round(win.startMs + localProgress * (win.endMs - win.startMs));
-      const pairSlotDelay = item.scenarioType === 'same_db' ? item.pairSlot * 15 : 0;
-      return { offsetMs: baseOffset + pairSlotDelay, stage: win.name };
+      const offsetMs = Math.round(win.startMs + localProgress * (win.endMs - win.startMs));
+      return { offsetMs, stage: win.name };
     }
   }
   return { offsetMs: 15000, stage: 'baseline_10vu' };
 }
 
-// Selang-selingkan request DB sama dan DB berbeda agar tiap request di-enqueue sekali saja
-// sehingga terhindar dari konflik 409 sambil menguji kontensi lock dan paralelisme.
-const JOB_QUEUE = [];
-const maxLen = Math.max(SAME_DB_REQUEST_IDS.length, DIFF_DB_REQUEST_IDS.length);
-for (let i = 0; i < maxLen; i++) {
-  if (i < SAME_DB_REQUEST_IDS.length) {
-    JOB_QUEUE.push({
-      requestId: SAME_DB_REQUEST_IDS[i],
-      scenarioType: 'same_db',
-      typeIndex: i,
-      typeTotal: SAME_DB_REQUEST_IDS.length,
-      pairIndex: Math.floor(i / 2),
-      pairSlot: i % 2,
-    });
-  }
-  if (i < DIFF_DB_REQUEST_IDS.length) {
-    JOB_QUEUE.push({
-      requestId: DIFF_DB_REQUEST_IDS[i],
-      scenarioType: 'diff_db',
-      typeIndex: i,
-      typeTotal: DIFF_DB_REQUEST_IDS.length,
-      pairIndex: i,
-      pairSlot: 0,
-    });
-  }
-}
-
+const HAS_JOB_SCENARIOS = SAME_DB_REQUEST_IDS.length > 0 || DIFF_DB_REQUEST_IDS.length > 0;
 const scenarios = {
   // Skenario 1: Beban baca naik bertahap (10 -> 30 -> 60 -> 100 VU) lalu turun untuk pemulihan (10 -> 0 VU)
   api_read_stress: {
@@ -100,14 +68,27 @@ const scenarios = {
   },
 };
 
-if (JOB_QUEUE.length > 0) {
-  // Skenario 2: Sebar pengiriman job migrasi pra-persetujuan ke lima tahap beban lalu polling hingga selesai.
-  // Memakai shared-iterations agar setiap request_id diambil unik lewat iterationInTest.
-  scenarios.migration_job_stress = {
-    executor: 'shared-iterations',
-    exec: 'runMigrationJobs',
-    vus: Math.min(20, JOB_QUEUE.length),
-    iterations: JOB_QUEUE.length,
+if (SAME_DB_REQUEST_IDS.length > 0) {
+  // Skenario 2A: Jalankan migrasi pra-persetujuan DB1 secara sekuensial berpasangan
+  // agar urutan versi linear terjaga sambil tetap menguji kontensi distributed lock.
+  scenarios.same_db_migration_jobs = {
+    executor: 'per-vu-iterations',
+    exec: 'runSameDBMigrationJobs',
+    vus: 1,
+    iterations: 1,
+    maxDuration: '4m',
+    startTime: '0s',
+  };
+}
+
+if (DIFF_DB_REQUEST_IDS.length > 0) {
+  // Skenario 2B: Jalankan migrasi pra-persetujuan DB2 paralel dengan DB1
+  // sambil menjaga urutan versi linear pada DB2.
+  scenarios.diff_db_migration_jobs = {
+    executor: 'per-vu-iterations',
+    exec: 'runDiffDBMigrationJobs',
+    vus: 1,
+    iterations: 1,
     maxDuration: '4m',
     startTime: '0s',
   };
@@ -118,7 +99,7 @@ export const options = {
   thresholds: {
     http_req_duration: ['p(95)<500'],
     http_req_failed: ['rate<0.02'],
-    ...(JOB_QUEUE.length > 0 ? { migration_job_success_rate: ['rate>0.95'] } : {}),
+    ...(HAS_JOB_SCENARIOS ? { migration_job_success_rate: ['rate>0.95'] } : {}),
   },
 };
 
@@ -146,6 +127,70 @@ function authHeaders(data) {
     'X-CSRF-Token': data.csrfToken,
     Cookie: `session_id=${data.sessionCookie}`,
   };
+}
+
+function isTerminalFailure(status) {
+  return (
+    status === 'failed' ||
+    status === 'partial' ||
+    status === 'partially_reverted' ||
+    status === 'uncertain'
+  );
+}
+
+function waitUntilOffset(startedAtMs, offsetMs) {
+  if (!startedAtMs) {
+    return;
+  }
+  const waitMs = startedAtMs + offsetMs - Date.now();
+  if (waitMs > 0) {
+    sleep(waitMs / 1000);
+  }
+}
+
+function enqueueRequest(requestID, headers, scenarioTag, stageTag) {
+  const enqueuedAtMs = Date.now();
+  const metricTags = { scenario_type: scenarioTag, load_stage: stageTag };
+  // Respons 202 Accepted tidak dihitung sebagai sukses eksekusi migrasi;
+  // hanya status terminal 'success' dari pollJobUntilDone yang dihitung selesai.
+  const enqRes = http.post(`${BASE_URL}/api/v1/requests/${requestID}/enqueue`, null, {
+    headers,
+    tags: { endpoint: 'enqueue', scenario_type: scenarioTag, load_stage: stageTag },
+  });
+  const accepted = check(enqRes, {
+    'POST /enqueue 202 Accepted': (r) => r.status === 202,
+  });
+  if (!accepted) {
+    jobsFailedTotal.add(1, metricTags);
+    jobSuccessRate.add(false, metricTags);
+    return null;
+  }
+
+  const payload = enqRes.json();
+  if (!payload || !payload.job_id) {
+    jobsFailedTotal.add(1, metricTags);
+    jobSuccessRate.add(false, metricTags);
+    return null;
+  }
+  return { jobId: payload.job_id, enqueuedAtMs };
+}
+
+function waitUntilRunningOrTerminal(jobID, headers, scenarioTag, stageTag) {
+  const deadline = Date.now() + POLL_TIMEOUT_SEC * 1000;
+  while (Date.now() < deadline) {
+    const res = http.get(`${BASE_URL}/api/v1/jobs/${jobID}`, {
+      headers,
+      tags: { endpoint: 'job_status', scenario_type: scenarioTag, load_stage: stageTag },
+    });
+    if (res.status === 200) {
+      const view = res.json();
+      const status = view.execution ? view.execution.status : view.request_status;
+      if (status === 'running' || status === 'success' || isTerminalFailure(status)) {
+        return;
+      }
+    }
+    sleep(0.05);
+  }
 }
 
 function pollJobUntilDone(jobID, enqueuedAtMs, headers, scenarioTag, stageTag) {
@@ -179,7 +224,7 @@ function pollJobUntilDone(jobID, enqueuedAtMs, headers, scenarioTag, stageTag) {
       jobSuccessRate.add(true, metricTags);
       return true;
     }
-    if (status === 'failed' || status === 'partial' || status === 'uncertain') {
+    if (isTerminalFailure(status)) {
       jobCompletionDurationMS.add(Date.now() - enqueuedAtMs, metricTags);
       jobsFailedTotal.add(1, metricTags);
       jobSuccessRate.add(false, metricTags);
@@ -220,42 +265,43 @@ export function runReadTraffic(data) {
   sleep(0.5);
 }
 
-export function runMigrationJobs(data) {
-  const idx = exec.scenario.iterationInTest;
-  if (idx >= JOB_QUEUE.length) {
-    return;
-  }
-  const item = JOB_QUEUE[idx];
-  const { offsetMs, stage } = scheduledJobWindow(item, item.typeTotal);
-  if (data.startedAtMs) {
-    const waitMs = data.startedAtMs + offsetMs - Date.now();
-    if (waitMs > 0) {
-      sleep(waitMs / 1000);
+export function runSameDBMigrationJobs(data) {
+  const headers = authHeaders(data);
+  for (let i = 0; i < SAME_DB_REQUEST_IDS.length; i += 2) {
+    const { offsetMs, stage } = scheduledStageWindow(i, SAME_DB_REQUEST_IDS.length);
+    waitUntilOffset(data.startedAtMs, offsetMs);
+
+    const firstJob = enqueueRequest(SAME_DB_REQUEST_IDS[i], headers, 'same_db', stage);
+    if (firstJob) {
+      // Tunggu hingga worker memulai job pertama sebelum mengirim job pasangannya pada DB sama
+      // agar lock-contention tetap terjadi tanpa membalik urutan versi linear.
+      waitUntilRunningOrTerminal(firstJob.jobId, headers, 'same_db', stage);
+    }
+
+    let secondJob = null;
+    if (i + 1 < SAME_DB_REQUEST_IDS.length) {
+      secondJob = enqueueRequest(SAME_DB_REQUEST_IDS[i + 1], headers, 'same_db', stage);
+    }
+
+    if (firstJob) {
+      pollJobUntilDone(firstJob.jobId, firstJob.enqueuedAtMs, headers, 'same_db', stage);
+    }
+    if (secondJob) {
+      pollJobUntilDone(secondJob.jobId, secondJob.enqueuedAtMs, headers, 'same_db', stage);
     }
   }
+}
 
+export function runDiffDBMigrationJobs(data) {
   const headers = authHeaders(data);
-  const enqueuedAtMs = Date.now();
-  const metricTags = { scenario_type: item.scenarioType, load_stage: stage };
+  for (let i = 0; i < DIFF_DB_REQUEST_IDS.length; i++) {
+    const { offsetMs, stage } = scheduledStageWindow(i, DIFF_DB_REQUEST_IDS.length);
+    waitUntilOffset(data.startedAtMs, offsetMs);
 
-  // Respons 202 Accepted tidak dihitung sebagai sukses eksekusi migrasi;
-  // hanya status terminal 'success' dari pollJobUntilDone yang dihitung selesai.
-  const enqRes = http.post(`${BASE_URL}/api/v1/requests/${item.requestId}/enqueue`, null, {
-    headers,
-    tags: { endpoint: 'enqueue', scenario_type: item.scenarioType, load_stage: stage },
-  });
-  const accepted = check(enqRes, {
-    'POST /enqueue 202 Accepted': (r) => r.status === 202,
-  });
-  if (!accepted) {
-    jobsFailedTotal.add(1, metricTags);
-    jobSuccessRate.add(false, metricTags);
-    return;
-  }
-
-  const payload = enqRes.json();
-  if (payload && payload.job_id) {
-    pollJobUntilDone(payload.job_id, enqueuedAtMs, headers, item.scenarioType, stage);
+    const job = enqueueRequest(DIFF_DB_REQUEST_IDS[i], headers, 'diff_db', stage);
+    if (job) {
+      pollJobUntilDone(job.jobId, job.enqueuedAtMs, headers, 'diff_db', stage);
+    }
   }
 }
 

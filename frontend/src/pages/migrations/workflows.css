@@ -20,11 +20,18 @@
   padding: 0;
   border: 0;
 }
-.m2 label {
+.m2 label:not(.check) {
   display: block;
   margin: 0.65rem 0;
 }
-.m2 label :is(textarea, select, input:not([type="checkbox"])) {
+.m2 label.check {
+  margin: 0.65rem 0;
+}
+.m2 input[type="checkbox"] {
+  width: auto;
+  flex: 0 0 auto;
+}
+.m2 label:not(.check) :is(textarea, select, input:not([type="checkbox"])) {
   display: block;
   box-sizing: border-box;
   width: 100%;

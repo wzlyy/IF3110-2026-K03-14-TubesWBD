@@ -97,7 +97,7 @@ function Editor({
             onChange={(e) => set("sql_up", e.target.value)}
           />
         </label>
-        <label>
+        <label className="check">
           <input
             type="checkbox"
             checked={draft.is_irreversible}

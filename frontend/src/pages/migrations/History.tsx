@@ -64,7 +64,7 @@ export default function History() {
       <h1>Riwayat eksekusi</h1>
       <Link to={base + "/migrations"}>Definisi migrasi</Link>
       <div className="m2-panel">
-        <label>
+        <label className="check">
           <input
             type="checkbox"
             checked={hide}

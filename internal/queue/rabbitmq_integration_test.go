@@ -22,7 +22,7 @@ func TestRabbitMQDurablePublishTracePropagationAndRetryIntegration(t *testing.T)
 	}
 	rmqURL := os.Getenv("RABBITMQ_URL")
 	if rmqURL == "" {
-		rmqURL = "amqp://guest:guest@127.0.0.1:15672/"
+		rmqURL = "amqp://guest:guest@127.0.0.1:15673/"
 	}
 
 	var traceBuf bytes.Buffer

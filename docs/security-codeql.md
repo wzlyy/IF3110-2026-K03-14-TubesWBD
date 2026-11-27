@@ -69,8 +69,11 @@ Ringkasan perbaikan (`6ede7c2`):
 | `7ea5343` | Merge PR #9 ke `main` (menambah worker/SPA) | [`45200770227`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45200770227) | Workflow sukses; memunculkan **Alert #9** (`go/sql-injection`) |
 | `1311887` | Merge PR #11 ke `main` (CodeQL SAST #13) | [`45824302384`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45824302384) | Workflow sukses; **Alert #9** (Go) & **Alert #10** (JS/TS) berstatus Open |
 | [`9fce00a`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/commit/9fce00a) | Push perbaikan Alert #9 (`sql.go`, `executor_normal.go`) & Alert #10 (`Review.tsx`) ke `main` (`CodeQL SAST #14`) | [`45833937684`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45833937684) | **Success — 0 open alert; Alert #9 & #10 tertutup** (Go & JS/TS) |
+| [`af0f12c`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/commit/af0f12c) | Merge PR #12 ke `main` (`CodeQL SAST #17`) | [`45865135522`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45865135522) | **Success** (Go & JS/TS) |
+| [`b01bbd4`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/commit/b01bbd4) | Merge PR #13 ke `main` (`CodeQL SAST #19`) | [`45910962063`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45910962063) | **Success** (Go & JS/TS) |
+| [`7052110`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/commit/7052110) | `HEAD` terbaru di `main` (`CodeQL SAST #20`) | [`45915919642`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45915919642) | **Success** (`Analyze (go)` & `Analyze (javascript-typescript)` lulus) |
 
-Verifikasi CI tambahan pada `9fce00a`: workflow *Quality checks #32* (Go `vet`/test, TypeScript check, `vite build`, dan `govulncheck`) turut selesai dengan status **Success** pada [Run `45833937735`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45833937735).
+Verifikasi CI tambahan: workflow *Quality checks #32* pada `9fce00a` selesai **Success** pada [Run `45833937735`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45833937735), dan pada `HEAD` `main` (`7052110`) workflow *Quality checks #42* (Go `vet`/test, TypeScript check, `vite build`, dan `govulncheck`) turut selesai dengan status **Success** pada [Run `45915919577`](https://github.com/wzlyy/IF3110-2026-K03-14-TubesWBD/actions/runs/45915919577).
 
 ## 4. Batasan Analisis Statis (SAST)
 

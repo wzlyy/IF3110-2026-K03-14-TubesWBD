@@ -10,7 +10,7 @@ import {
 } from "react-router-dom";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import { clearError, useApiState } from "./api/client";
-import { Skeleton } from "./components/shared";
+import { NoticeBanner, Skeleton } from "./components/shared";
 import Layout from "./components/Layout";
 import LoginPage from "./pages/LoginPage";
 import { Users, Groups, Grants, Connections } from "./pages/admin/Admin";
@@ -36,14 +36,12 @@ function App() {
       {pending > 0 && (
         <div className="loadbar" role="progressbar" aria-label="Memuat" />
       )}
-      {error && (
-        <div role="alert" className="error-banner">
-          {error}
-          <button onClick={clearError} aria-label="Tutup pesan">
-            ×
-          </button>
-        </div>
-      )}
+      <NoticeBanner
+        kind="error"
+        message={error}
+        durationMs={8000}
+        onClose={clearError}
+      />
       {!ready ? (
         <Skeleton />
       ) : (

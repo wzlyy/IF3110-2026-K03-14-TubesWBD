@@ -1,14 +1,30 @@
 import { useState } from "react";
-import { Link, NavLink, useParams, useSearchParams } from "react-router-dom";
-import { ArrowUpRight, Database, Search } from "lucide-react";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
+  ArrowUpRight,
+  ChevronLeft,
+  ChevronRight,
+  Database,
+  FileCode2,
+  GitCompare,
+  History,
+  Layers,
+  Play,
+  RefreshCw,
+  Search,
+  Table2,
+} from "lucide-react";
+import {
+  DatabaseSubNav,
   GridTable,
   Skeleton,
-  useResource,
+  statusBadgeClass,
   useAction,
+  useResource,
 } from "../../components/shared";
 import { mutate } from "../../api/client";
 import type { Connection } from "../admin/Admin";
+
 interface DB extends Connection {
   access_level: string;
   lock_state?: string;
@@ -46,98 +62,161 @@ interface Page {
   } | null;
   page_size: number;
 }
+
 export function Databases() {
-  const { data, error } = useResource<{ databases: DB[] }>("/databases"),
-    [filter, setFilter] = useState("");
-  const items = (data?.databases || []).filter((d) =>
+  const { data, error, refresh } = useResource<{ databases: DB[] }>("/databases");
+  const [filter, setFilter] = useState("");
+  const all = data?.databases || [];
+  const items = all.filter((d) =>
     [d.name, d.db_name, d.host].some((s) =>
       s.toLowerCase().includes(filter.toLowerCase()),
     ),
   );
+  const editCount = all.filter((d) => d.access_level === "VIEW_EDIT").length;
+  const viewCount = all.filter((d) => d.access_level === "VIEW_ONLY").length;
+
   return (
     <>
-      <h1>Database</h1>
+      <div className="page-head">
+        <div>
+          <h1>Daftar Database</h1>
+          <p className="page-subtitle">
+            Pilih database target PostgreSQL untuk menjelajahi skema, melihat
+            data, atau mengelola migrasi.
+          </p>
+        </div>
+        <div className="actions">
+          <button onClick={refresh}>
+            <RefreshCw size={15} /> Segarkan
+          </button>
+          <Link className="primary" to="/requests">
+            Antrean Tinjauan
+          </Link>
+        </div>
+      </div>
+
+      {data && (
+        <div className="stats-strip">
+          <div className="stat-card">
+            <small>Total Koneksi</small>
+            <strong>{all.length}</strong>
+          </div>
+          <div className="stat-card">
+            <small>Akses VIEW_EDIT</small>
+            <strong>{editCount}</strong>
+          </div>
+          <div className="stat-card">
+            <small>Akses VIEW_ONLY</small>
+            <strong>{viewCount}</strong>
+          </div>
+        </div>
+      )}
+
       <div className="row toolbar">
         <h2>
           Koneksi tersedia{" "}
-          {data && <span className="count">{data.databases.length}</span>}
+          {data && <span className="count">{items.length}</span>}
         </h2>
         <label className="search">
           <Search size={16} />
           <input
             aria-label="Cari database"
-            placeholder="Cari database"
+            placeholder="Cari nama, database, atau host…"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
           />
         </label>
       </div>
+
       {!data ? (
         !error && <Skeleton />
       ) : (
         <div className="cards">
-          {items.map((d) => (
-            <Link
-              className="db-card"
-              key={d.id}
-              to={"/databases/" + d.id + "/schema"}
-            >
-              <div className="row">
-                <span className="db-icon">
-                  <Database size={22} />
-                </span>
-                <ArrowUpRight size={17} />
-              </div>
-              <h2>{d.name}</h2>
-              <p>
-                {d.dbms} · {d.db_name}
-              </p>
-              <footer>
-                <span className="badge">{d.access_level}</span>
-                {d.lock_state && <span>{d.lock_state}</span>}
-              </footer>
-            </Link>
-          ))}
+          {items.map((d) => {
+            const base = "/databases/" + d.id;
+            return (
+              <article className="db-card" key={d.id}>
+                <Link className="db-card-link" to={base + "/schema"}>
+                  <div className="row">
+                    <span className="db-icon">
+                      <Database size={20} />
+                    </span>
+                    <ArrowUpRight size={17} color="#64748b" />
+                  </div>
+                  <h2>{d.name}</h2>
+                  <p>
+                    {d.dbms.toUpperCase()} · {d.db_name} ({d.host}:{d.port})
+                  </p>
+                </Link>
+                <footer>
+                  <div className="db-card-meta">
+                    <span className={statusBadgeClass(d.access_level)}>
+                      {d.access_level}
+                    </span>
+                    {d.lock_state && (
+                      <span className={statusBadgeClass(d.lock_state)}>
+                        {d.lock_state}
+                      </span>
+                    )}
+                  </div>
+                  <div className="db-card-shortcuts">
+                    <Link to={base + "/schema"}>
+                      <Layers size={13} /> Skema
+                    </Link>
+                    <Link to={base + "/data"}>
+                      <Table2 size={13} /> Data
+                    </Link>
+                    <Link to={base + "/migrations"}>
+                      <FileCode2 size={13} /> Migrasi
+                    </Link>
+                    <Link to={base + "/history"}>
+                      <History size={13} /> Riwayat
+                    </Link>
+                  </div>
+                </footer>
+              </article>
+            );
+          })}
           {!items.length && (
-            <p className="empty">
-              {filter
-                ? "Database tidak ditemukan."
-                : "Belum ada database yang dapat diakses."}
-            </p>
+            <div className="panel" style={{ gridColumn: "1 / -1" }}>
+              <p className="empty">
+                {filter
+                  ? "Database yang dicari tidak ditemukan."
+                  : "Belum ada database yang dapat diakses oleh grup Anda."}
+              </p>
+            </div>
           )}
         </div>
       )}
     </>
   );
 }
-const tabs = [
-  ["schema", "Skema"],
-  ["data", "Data"],
-  ["explain", "Explain"],
-  ["diff", "Schema Diff"],
-  ["migrations", "Migrasi"],
-  ["history", "Riwayat"],
-];
+
 export function Explorer({ mode }: { mode: string }) {
-  const { id } = useParams(),
-    base = "/databases/" + id;
+  const { id = "" } = useParams();
+  const base = "/databases/" + id;
   const schema = useResource<SchemaResponse>(base + "/schema");
   const tables = (schema.data?.catalog.Schemas || []).flatMap(
     (s) => s.Tables || [],
   );
+  const dbMeta = schema.data?.database;
+  const subtitle = dbMeta
+    ? `${dbMeta.dbms.toUpperCase()} · ${dbMeta.db_name} (${dbMeta.host}:${dbMeta.port})`
+    : undefined;
+
   return (
     <>
-      <Link className="back" to="/databases">
-        ← Database
-      </Link>
-      <h1>{schema.data?.database.name || "Database"}</h1>
-      <nav className="tabs">
-        {tabs.map(([path, title]) => (
-          <NavLink key={path} to={base + "/" + path}>
-            {title}
-          </NavLink>
-        ))}
-      </nav>
+      <DatabaseSubNav
+        dbId={id}
+        title={dbMeta?.name || "Database"}
+        subtitle={subtitle}
+        accessLevel={schema.data?.access_level}
+        actions={
+          <button onClick={schema.refresh}>
+            <RefreshCw size={15} /> Segarkan
+          </button>
+        }
+      />
       {mode === "schema" &&
         (schema.data ? (
           <Schema tables={tables} />
@@ -158,13 +237,22 @@ export function Explorer({ mode }: { mode: string }) {
     </>
   );
 }
+
 function Schema({ tables }: { tables: Table[] }) {
-  if (!tables.length) return <p className="empty">Belum ada tabel.</p>;
+  if (!tables.length) {
+    return (
+      <div className="panel">
+        <p className="empty">Belum ada tabel pada database target ini.</p>
+      </div>
+    );
+  }
   return (
     <section>
-      <h2>
-        Tabel <span className="count">{tables.length}</span>
-      </h2>
+      <div className="row toolbar">
+        <h2>
+          Daftar Tabel <span className="count">{tables.length}</span>
+        </h2>
+      </div>
       {tables.map((t, i) => (
         <details
           className="panel"
@@ -172,15 +260,34 @@ function Schema({ tables }: { tables: Table[] }) {
           open={i === 0}
         >
           <summary>
-            {t.Schema}.{t.Name}
+            <span>
+              {t.Schema}.{t.Name}
+            </span>
+            <span className="actions">
+              <span className="badge badge-neutral">
+                {(t.Columns || []).length} kolom
+              </span>
+              <span className="badge badge-neutral">
+                {(t.Constraints || []).length} constraint
+              </span>
+              <span className="badge badge-neutral">
+                {(t.Indexes || []).length} index
+              </span>
+            </span>
           </summary>
           <h3>Kolom</h3>
           <GridTable
             columns={["Nama", "Tipe", "Nullable", "Default"]}
             rows={(t.Columns || []).map((c) => [
-              c.Name,
+              <code>{c.Name}</code>,
               c.DataType,
-              c.Nullable ? "Ya" : "Tidak",
+              <span
+                className={
+                  c.Nullable ? "badge badge-warning" : "badge badge-success"
+                }
+              >
+                {c.Nullable ? "Ya" : "NOT NULL"}
+              </span>,
               c.Default ?? "—",
             ])}
           />
@@ -195,8 +302,8 @@ function Schema({ tables }: { tables: Table[] }) {
               <GridTable
                 columns={["Nama", "Tipe", "Kolom", "Definisi"]}
                 rows={(keys || []).map((k) => [
-                  k.Name,
-                  k.Type,
+                  <code>{k.Name}</code>,
+                  <span className="badge badge-neutral">{k.Type}</span>,
                   (k.Columns || []).join(", "),
                   k.Definition,
                 ])}
@@ -208,6 +315,7 @@ function Schema({ tables }: { tables: Table[] }) {
     </section>
   );
 }
+
 function Data({ base, tables }: { base: string; tables: Table[] }) {
   const [params, setParams] = useSearchParams();
   const selected =
@@ -217,6 +325,7 @@ function Data({ base, tables }: { base: string; tables: Table[] }) {
     ) || tables[0];
   const rawPage = Number(params.get("page") || "1");
   const page = Number.isInteger(rawPage) && rawPage >= 1 ? rawPage : 1;
+
   function query(t: Table, p: number) {
     return new URLSearchParams({
       schema: t.Schema,
@@ -224,26 +333,53 @@ function Data({ base, tables }: { base: string; tables: Table[] }) {
       page: String(p),
     });
   }
+
   const result = useResource<Page>(
     base + "/data?" + (selected ? query(selected, page) : ""),
   );
-  if (!selected) return <p className="empty">Belum ada tabel.</p>;
+
+  if (!selected) {
+    return (
+      <div className="panel">
+        <p className="empty">Belum ada tabel untuk ditampilkan datanya.</p>
+      </div>
+    );
+  }
+
   const data = result.data?.data;
+
   return (
     <section>
-      <label className="table-picker">
-        Tabel
-        <select
-          value={tables.indexOf(selected)}
-          onChange={(e) => setParams(query(tables[Number(e.target.value)], 1))}
-        >
-          {tables.map((t, i) => (
-            <option key={i} value={i}>
-              {t.Schema}.{t.Name}
-            </option>
-          ))}
-        </select>
-      </label>
+      <div className="panel">
+        <div className="row">
+          <label className="table-picker" style={{ margin: 0, flex: "1 1 260px" }}>
+            Pilih Tabel
+            <select
+              value={tables.indexOf(selected)}
+              onChange={(e) =>
+                setParams(query(tables[Number(e.target.value)], 1))
+              }
+            >
+              {tables.map((t, i) => (
+                <option key={i} value={i}>
+                  {t.Schema}.{t.Name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="actions">
+            {data && (
+              <span className="badge badge-neutral">
+                Halaman {data.Page} · maks {result.data?.page_size} baris
+              </span>
+            )}
+            <button onClick={result.refresh}>
+              <RefreshCw size={14} /> Muat Ulang
+            </button>
+          </div>
+        </div>
+      </div>
+
       {data ? (
         <>
           <GridTable
@@ -256,20 +392,22 @@ function Data({ base, tables }: { base: string; tables: Table[] }) {
           />
           <div className="row pagination">
             <span>
-              Halaman {data.Page} · {result.data?.page_size} baris per halaman
+              Menampilkan halaman <strong>{data.Page}</strong> (
+              {(data.Rows || []).length} baris · kapasitas{" "}
+              {result.data?.page_size}/halaman)
             </span>
             <div className="actions">
               <button
                 disabled={page <= 1}
                 onClick={() => setParams(query(selected, page - 1))}
               >
-                Sebelumnya
+                <ChevronLeft size={15} /> Sebelumnya
               </button>
               <button
                 disabled={!data.HasNext}
                 onClick={() => setParams(query(selected, page + 1))}
               >
-                Berikutnya
+                Berikutnya <ChevronRight size={15} />
               </button>
             </div>
           </div>
@@ -280,6 +418,7 @@ function Data({ base, tables }: { base: string; tables: Table[] }) {
     </section>
   );
 }
+
 interface Step {
   Label: string;
   Relation: string;
@@ -298,6 +437,7 @@ interface Plan {
   ExecutionTime: number | null;
   PlanningTime: number | null;
 }
+
 function PlanStep({ step }: { step: Step }) {
   return (
     <li>
@@ -326,10 +466,12 @@ function PlanStep({ step }: { step: Step }) {
     </li>
   );
 }
+
 function Explain({ base, canAnalyze }: { base: string; canAnalyze: boolean }) {
-  const [plan, setPlan] = useState<Plan>(),
-    [analyze, setAnalyze] = useState(false),
-    a = useAction();
+  const [plan, setPlan] = useState<Plan>();
+  const [analyze, setAnalyze] = useState(false);
+  const a = useAction();
+
   return (
     <>
       <form
@@ -348,13 +490,18 @@ function Explain({ base, canAnalyze }: { base: string; canAnalyze: boolean }) {
           }, "");
         }}
       >
-        <h2>Execution plan</h2>
+        <h2>Execution Plan (EXPLAIN)</h2>
+        <p className="page-subtitle" style={{ marginBottom: "0.9rem" }}>
+          Analisis rencana eksekusi query SELECT/DML secara aman di dalam
+          transaksi yang selalu di-rollback.
+        </p>
         <label>
           Query SQL
           <textarea
             name="sql"
             required
-            placeholder="SELECT …"
+            wrap="off"
+            placeholder="SELECT * FROM public.nama_tabel LIMIT 10;"
             spellCheck={false}
           />
         </label>
@@ -365,7 +512,7 @@ function Explain({ base, canAnalyze }: { base: string; canAnalyze: boolean }) {
               checked={analyze}
               onChange={(e) => setAnalyze(e.target.checked)}
             />
-            EXPLAIN ANALYZE
+            Aktifkan EXPLAIN ANALYZE (eksekusi fisik dalam transaksi rollback)
           </label>
         )}
         {analyze && (
@@ -375,26 +522,36 @@ function Explain({ base, canAnalyze }: { base: string; canAnalyze: boolean }) {
             sequence dapat bertahan setelah rollback.
           </label>
         )}
-        <button className="primary" disabled={a.busy}>
-          Jalankan Explain
-        </button>
+        <div className="actions" style={{ marginTop: "0.9rem" }}>
+          <button className="primary" disabled={a.busy}>
+            <Play size={15} /> Jalankan Explain
+          </button>
+        </div>
       </form>
       {plan && (
         <section className="panel">
-          <h2>Hasil Explain</h2>
-          {plan.PlanningTime != null && (
-            <p>Waktu perencanaan: {plan.PlanningTime} ms</p>
-          )}
-          {plan.ExecutionTime != null && (
-            <p>Waktu eksekusi: {plan.ExecutionTime} ms</p>
-          )}
+          <div className="row" style={{ marginBottom: "0.75rem" }}>
+            <h2>Hasil Execution Plan</h2>
+            <div className="actions">
+              {plan.PlanningTime != null && (
+                <span className="badge badge-info">
+                  Planning: {plan.PlanningTime} ms
+                </span>
+              )}
+              {plan.ExecutionTime != null && (
+                <span className="badge badge-success">
+                  Execution: {plan.ExecutionTime} ms
+                </span>
+              )}
+            </div>
+          </div>
           {plan.Root && (
             <ul className="plan">
               <PlanStep step={plan.Root} />
             </ul>
           )}
-          <details>
-            <summary>Plan mentah</summary>
+          <details style={{ marginTop: "1rem" }}>
+            <summary>Lihat Plan Mentah (JSON)</summary>
             <pre>{plan.Raw}</pre>
           </details>
         </section>
@@ -402,6 +559,7 @@ function Explain({ base, canAnalyze }: { base: string; canAnalyze: boolean }) {
     </>
   );
 }
+
 interface DiffResult {
   generated_sql: string;
   has_destructive: boolean;
@@ -419,9 +577,11 @@ interface DiffResult {
     }[];
   };
 }
+
 function Diff({ base, canEdit }: { base: string; canEdit: boolean }) {
-  const [result, setResult] = useState<DiffResult>(),
-    a = useAction();
+  const [result, setResult] = useState<DiffResult>();
+  const a = useAction();
+
   return (
     <>
       <form
@@ -441,30 +601,41 @@ function Diff({ base, canEdit }: { base: string; canEdit: boolean }) {
           );
         }}
       >
-        <h2>Bandingkan skema</h2>
+        <h2>Bandingkan Skema (Schema Diff)</h2>
+        <p className="page-subtitle" style={{ marginBottom: "0.9rem" }}>
+          Tempel definisi skema target dalam format JSON untuk membandingkan
+          perubahan dan menghasilkan kandidat DDL.
+        </p>
         <label>
           Skema target (JSON)
           <textarea
             required
             name="target"
+            wrap="off"
             spellCheck={false}
             placeholder={'{"tables": [...]}'}
           />
         </label>
-        <button className="primary" disabled={a.busy}>
-          Bandingkan skema
-        </button>
+        <div className="actions" style={{ marginTop: "0.9rem" }}>
+          <button className="primary" disabled={a.busy}>
+            <GitCompare size={15} /> Bandingkan Skema
+          </button>
+        </div>
       </form>
       {result && (
         <section className="panel">
-          <h2>
-            {result.diff_result.IsIdentical
-              ? "Skema identik"
-              : "Perubahan skema"}
-          </h2>
-          {result.has_destructive && (
-            <p role="alert">Pratinjau berisi perubahan destruktif.</p>
-          )}
+          <div className="row" style={{ marginBottom: "0.75rem" }}>
+            <h2>
+              {result.diff_result.IsIdentical
+                ? "Skema Identik"
+                : "Perubahan Skema Terdeteksi"}
+            </h2>
+            {result.has_destructive && (
+              <span className="badge badge-danger" role="alert">
+                Mengandung perubahan destruktif
+              </span>
+            )}
+          </div>
           {!result.diff_result.IsIdentical && (
             <GridTable
               columns={[
@@ -476,25 +647,35 @@ function Diff({ base, canEdit }: { base: string; canEdit: boolean }) {
                 "Destruktif",
               ]}
               rows={(result.diff_result.Changes || []).map((c) => [
-                c.Action,
-                [c.Schema, c.Table, c.Object].filter(Boolean).join("."),
+                <span className="badge badge-neutral">{c.Action}</span>,
+                <code>
+                  {[c.Schema, c.Table, c.Object].filter(Boolean).join(".")}
+                </code>,
                 c.Description,
                 c.OldValue || "—",
                 c.NewValue || "—",
-                c.Destructive ? "Ya" : "Tidak",
+                <span
+                  className={
+                    c.Destructive ? "badge badge-danger" : "badge badge-success"
+                  }
+                >
+                  {c.Destructive ? "Ya" : "Tidak"}
+                </span>,
               ])}
             />
           )}
           <h3>Kandidat DDL</h3>
           <pre>{result.generated_sql || "—"}</pre>
           {canEdit && result.generated_sql && (
-            <Link
-              className="primary"
-              to={base + "/migrations"}
-              state={{ sql_up: result.generated_sql }}
-            >
-              Bawa SQL ke editor migrasi
-            </Link>
+            <div className="actions" style={{ marginTop: "1rem" }}>
+              <Link
+                className="primary"
+                to={base + "/migrations"}
+                state={{ sql_up: result.generated_sql }}
+              >
+                <FileCode2 size={15} /> Bawa SQL ke Editor Migrasi
+              </Link>
+            </div>
           )}
         </section>
       )}

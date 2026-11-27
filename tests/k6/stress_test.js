@@ -184,7 +184,7 @@ function waitUntilRunningOrTerminal(jobID, headers, scenarioTag, stageTag) {
     });
     if (res.status === 200) {
       const view = res.json();
-      const status = view.execution ? view.execution.status : view.request_status;
+      const status = view.request_status || (view.execution ? view.execution.status : '');
       if (status === 'running' || status === 'success' || isTerminalFailure(status)) {
         return;
       }
@@ -208,7 +208,7 @@ function pollJobUntilDone(jobID, enqueuedAtMs, headers, scenarioTag, stageTag) {
       continue;
     }
     const view = res.json();
-    const status = view.execution ? view.execution.status : view.request_status;
+    const status = view.request_status || (view.execution ? view.execution.status : '');
 
     if (!recordedQueueWait && view.execution && view.execution.started_at) {
       const startedMs = Date.parse(view.execution.started_at);
